@@ -18,12 +18,7 @@
  
 ## Usage
 Simply copy this subscription link and paste it on Hiddify Application
+```bash
 https://raw.githubusercontent.com/HamoonSoleimani/Pr0xySh4rk24/refs/heads/main/configsbase64.txt
 
-## Setup Instructions
-
-1. **Clone this Repository:**
-   ```bash
-   git clone https://github.com/HamoonSoleimani/Pr0xySh4rk24.git
-   cd Pr0xySh4rk24
 
