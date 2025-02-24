@@ -2,8 +2,8 @@ name: Pr0xySh4rk24 Daily Config Update
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Runs every day at midnight UTC; adjust as needed.
-  workflow_dispatch:  # Allows manual trigger if desired.
+    - cron: '0 0 * * *'  # Runs every day at midnight UTC
+  workflow_dispatch:
 
 jobs:
   update-config:
@@ -12,7 +12,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
         with:
-          persist-credentials: false  # To allow pushing with GITHUB_TOKEN
+          persist-credentials: true
 
       - name: Set up Python 3.x
         uses: actions/setup-python@v4
@@ -27,12 +27,7 @@ jobs:
       - name: Run Pr0xySh4rk24 Script
         run: |
           python pr0xySh4rk24.py --input subs.txt --output configsbase64.txt -r 3 --test tcp+http
-      
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-        with:
-          persist-credentials: true
-      
+
       - name: Commit and Push Changes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -46,4 +41,3 @@ jobs:
           else
             echo "No changes to commit."
           fi
-      
