@@ -34,7 +34,6 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          # Set the remote URL using the PAT
           git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
           git add configsbase64.txt
           if ! git diff --cached --quiet; then
@@ -43,4 +42,3 @@ jobs:
           else
             echo "No changes to commit."
           fi
-      
