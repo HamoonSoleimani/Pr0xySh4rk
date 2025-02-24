@@ -27,15 +27,15 @@ jobs:
       - name: Run Pr0xySh4rk24 Script
         run: |
           python pr0xySh4rk24.py --input subs.txt --output configsbase64.txt -r 3 --test tcp+http
-
+      
       - name: Commit and Push Changes
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          # Set the remote URL to include the token
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          # Set the remote URL using the PAT
+          git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
           git add configsbase64.txt
           if ! git diff --cached --quiet; then
             git commit -m "Update configsbase64.txt via GitHub Actions"
@@ -43,3 +43,4 @@ jobs:
           else
             echo "No changes to commit."
           fi
+      
