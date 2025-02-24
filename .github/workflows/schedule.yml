@@ -2,7 +2,7 @@ name: Pr0xySh4rk24 Daily Config Update
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Runs every day at midnight UTC
+    - cron: '0 0 * * *'  # Runs every day at midnight UTC; adjust as needed.
   workflow_dispatch:
 
 jobs:
@@ -12,7 +12,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
         with:
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Set up Python 3.x
         uses: actions/setup-python@v4
@@ -34,6 +34,8 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+          # Set the remote URL to include the token
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           git add configsbase64.txt
           if ! git diff --cached --quiet; then
             git commit -m "Update configsbase64.txt via GitHub Actions"
