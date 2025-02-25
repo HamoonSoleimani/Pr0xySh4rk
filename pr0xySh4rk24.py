@@ -780,53 +780,6 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
     print("Exiting single_test_pass")
 
 # ---------------------------
-# Saving configuration (Thread-safe)
-# ---------------------------
-def save_config(config: Dict[str, Any], filepath: str = "merge_config.json"):
-    try:
-        for outbound in config.get("outbounds", []):
-            if "udp_delay" in outbound:
-                del outbound["udp_delay"]
-            if "tcp_delay" in outbound:
-                del outbound["tcp_delay"]
-            if "http_delay" in outbound:
-                del outbound["http_delay"]
-            if "source" in outbound:
-                del outbound["source"]
-        with open(filepath, "w") as outfile:
-            json.dump(config, outfile, indent=2)
-        print(f"Merged config saved to {filepath}")
-    except Exception as e:
-        print(f"Error saving config to {filepath}: {e}")
-
-# ---------------------------
-# Fetch and parse subscription URLs in Threads.
-# Each outbound is annotated with its source URL.
-# ---------------------------
-def fetch_and_parse_subscription_thread(url: str, proxy: Optional[str] = None, all_tags: set = None) -> List[Dict[str, Any]]:
-    print(f"Thread {os.getpid()}: Fetching and parsing: {url}")
-    content = fetch_content(url, proxy)
-    if content:
-        normalized_content = content.strip().replace("\n", "").replace("\r", "").replace(" ", "")
-        try:
-            decoded_possible = base64.b64decode(normalized_content, validate=True).decode("utf-8")
-            content = decoded_possible
-        except Exception:
-            pass
-        outbounds_list = parse_config_url1_2(content, all_tags)
-        for outbound in outbounds_list:
-            outbound["source"] = url
-        if outbounds_list:
-            print(f"Thread {os.getpid()}: Parsed {len(outbounds_list)} outbounds from {url}")
-            return outbounds_list
-        else:
-            print(f"Thread {os.getpid()}: No outbounds parsed from {url}")
-            return []
-    else:
-        print(f"Thread {os.getpid()}: Failed to fetch content from {url}, skipping.")
-        return []
-
-# ---------------------------
 # Main function
 # ---------------------------
 def main():
@@ -846,6 +799,9 @@ def main():
                         help="Output final config in plain text instead of Base64")
     parser.set_defaults(base64_encode=True)
     args = parser.parse_args()
+
+    # Decode the output filename in case it was URL encoded.
+    args.output = urllib.parse.unquote(args.output)
 
     # Remove environment proxy settings
     original_env = {}
@@ -978,12 +934,12 @@ def main():
 
     if not subscription_urls:
         print("No subscription URLs found.")
+        final_json_str = json.dumps(base_config_template, indent=2)
         if args.base64_encode:
-            final_json_str = json.dumps(base_config_template, indent=2)
-            final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-            print(final_encoded)
+            final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
         else:
-            print(json.dumps(base_config_template, indent=2))
+            final_output = final_json_str
+        print(final_output)
         return
 
     all_tags = set()
@@ -1000,12 +956,12 @@ def main():
                 parsed_outbounds_lists.append(result)
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after fetching.")
+            final_json_str = json.dumps(base_config_template, indent=2)
             if args.base64_encode:
-                final_json_str = json.dumps(base_config_template, indent=2)
-                final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-                print(final_encoded)
+                final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
             else:
-                print(json.dumps(base_config_template, indent=2))
+                final_output = final_json_str
+            print(final_output)
             sys.exit(0)
 
     all_parsed_outbounds = [ob for sublist in parsed_outbounds_lists for ob in sublist]
@@ -1014,52 +970,45 @@ def main():
     all_parsed_outbounds = deduplicate_outbounds(all_parsed_outbounds)
     print(f"Total unique outbounds after deduplication: {len(all_parsed_outbounds)}")
 
-    # If test mode is tcp+http, perform a two-pass test:
     if args.test == "tcp+http":
         print("\n=== First pass: TCP test ===")
         single_test_pass(all_parsed_outbounds, "tcp", args.threads, args.test_proxy, args.repetitions)
         survivors_tcp = [ob for ob in all_parsed_outbounds if ob.get("tcp_delay", float('inf')) != float('inf')]
         print(f"{len(survivors_tcp)} outbounds passed the TCP test. Proceeding to HTTP test...")
-
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after first pass.")
+            final_json_str = json.dumps(base_config_template, indent=2)
             if args.base64_encode:
-                final_json_str = json.dumps(base_config_template, indent=2)
-                final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-                print(final_encoded)
+                final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
             else:
-                print(json.dumps(base_config_template, indent=2))
+                final_output = final_json_str
+            print(final_output)
             sys.exit(0)
-
         print("\n=== Second pass: HTTP test ===")
         single_test_pass(survivors_tcp, "http", args.threads, args.test_proxy, args.repetitions)
         survivors_http = [ob for ob in survivors_tcp if ob.get("http_delay", float('inf')) != float('inf')]
         print(f"{len(survivors_http)} outbounds passed both TCP and HTTP tests.")
-
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after second pass.")
+            final_json_str = json.dumps(base_config_template, indent=2)
             if args.base64_encode:
-                final_json_str = json.dumps(base_config_template, indent=2)
-                final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-                print(final_encoded)
+                final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
             else:
-                print(json.dumps(base_config_template, indent=2))
+                final_output = final_json_str
+            print(final_output)
             sys.exit(0)
-
         all_parsed_outbounds = filter_best_outbounds_by_protocol(survivors_http)
         print(f"Total outbounds after filtering best per protocol: {len(all_parsed_outbounds)}")
-
     else:
-        # Single-pass test mode: tcp, udp, or http.
         single_test_pass(all_parsed_outbounds, args.test, args.threads, args.test_proxy, args.repetitions)
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after testing.")
+            final_json_str = json.dumps(base_config_template, indent=2)
             if args.base64_encode:
-                final_json_str = json.dumps(base_config_template, indent=2)
-                final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-                print(final_encoded)
+                final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
             else:
-                print(json.dumps(base_config_template, indent=2))
+                final_output = final_json_str
+            print(final_output)
             sys.exit(0)
         if args.test == "tcp":
             all_parsed_outbounds = [ob for ob in all_parsed_outbounds if ob.get("tcp_delay", float('inf')) != float('inf')]
@@ -1074,18 +1023,19 @@ def main():
     merged_config = replace_existing_outbounds(base_config_template.copy(), all_parsed_outbounds)
     final_json_str = json.dumps(merged_config, indent=2)
     if args.base64_encode:
-        final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-        output_content = final_encoded
+        final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
     else:
-        output_content = final_json_str
+        final_output = final_json_str
 
     if args.output:
         try:
-            save_config(merged_config, filepath=args.output)
+            with open(args.output, "w") as f:
+                f.write(final_output)
+            print(f"Config written to {args.output}")
         except Exception as e:
             print(f"Error writing to output file: {e}")
     else:
-        print(output_content)
+        print(final_output)
 
     for var, value in original_env.items():
         os.environ[var] = value
