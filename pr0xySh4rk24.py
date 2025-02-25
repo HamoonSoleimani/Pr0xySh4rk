@@ -13,14 +13,6 @@ import signal
 import sys
 from typing import List, Dict, Optional, Any
 
-def robust_b64decode(data: str) -> Optional[str]:
-    try:
-        padding = "=" * (-len(data) % 4)
-        return base64.urlsafe_b64decode(data + padding).decode("utf-8")
-    except Exception as decode_error:
-        print(f"Thread {os.getpid()}: Base64 decoding error: {decode_error} - Data: {data}")
-        return None
-
 # --- Configuration ---
 TEST_URL = "https://google.com"  # Define test URL here for easy changing
 
@@ -28,10 +20,6 @@ TEST_URL = "https://google.com"  # Define test URL here for easy changing
 total_outbounds_count = 0
 completed_outbounds_count = 0
 is_ctrl_c_pressed = False
-
-# Global variables that are set in main() and used in the thread worker function.
-RETRY_COUNT = 3
-TEST_TYPE = "tcp+http"
 
 # ---------------------------
 # Helper: Generate unique Pr0xySh4rk-formatted tag
@@ -77,108 +65,6 @@ def fetch_content(url: str, proxy: Optional[str] = None) -> Optional[str]:
         error_message = str(e)
         print(f"Thread {os.getpid()}: Error fetching URL {url}{' via proxy ' + proxy if proxy else ''}: {error_type} - {error_message}")
         return None
-
-def parse_subscription_content(content):
-    """
-    Parses the subscription content (a string) and returns a list of proxy entries.
-    In this example, each non-empty line is assumed to represent one proxy entry.
-    """
-    proxies = []
-    for line in content.splitlines():
-        line = line.strip()
-        if line:
-            proxies.append(line)
-    return proxies
-
-def test_proxy_tcp(proxy):
-    """
-    Tests if the proxy is reachable via a TCP connection.
-    The proxy is assumed to be in the format "host:port".
-    """
-    try:
-        host, port = proxy.split(':')
-        port = int(port)
-        sock = socket.create_connection((host, port), timeout=5)
-        sock.close()
-        return True
-    except Exception as e:
-        return False
-
-def test_proxy_http(proxy):
-    """
-    Tests if the proxy can perform an HTTP GET request.
-    The proxy is assumed to be in the format "host:port".
-    """
-    try:
-        http_proxies = {
-            "http": f"http://{proxy}",
-            "https": f"http://{proxy}",
-        }
-        response = requests.get("http://example.com", proxies=http_proxies, timeout=5)
-        return response.status_code == 200
-    except Exception as e:
-        return False
-
-def fetch_and_parse_subscription_thread(url, proxy_arg, all_tags):
-    """
-    Worker function for the thread pool.
-    It fetches the subscription URL using the optional proxy, decodes the response
-    (if necessary), parses the proxy entries, and tests each entry according to TEST_TYPE.
-
-    Args:
-        url (str): The subscription URL to fetch.
-        proxy_arg (str): Optional proxy to use for fetching the URL.
-        all_tags (list): A shared list that can be used to aggregate tags (if needed).
-
-    Returns:
-        list: A list of valid proxy entries fetched and tested from the subscription.
-    """
-    global RETRY_COUNT, TEST_TYPE
-    valid_proxies = []
-    for attempt in range(RETRY_COUNT + 1):
-        try:
-            # Use the provided proxy to fetch the subscription if specified.
-            proxies = None
-            if proxy_arg:
-                proxies = {
-                    "http": proxy_arg,
-                    "https": proxy_arg,
-                }
-            response = requests.get(url, proxies=proxies, timeout=10)
-            response.raise_for_status()
-            content = response.text.strip()
-
-            # Try decoding the content as base64.
-            try:
-                decoded_content = base64.b64decode(content).decode("utf-8")
-                content = decoded_content
-            except Exception:
-                # If decoding fails, assume the content is plain text.
-                pass
-
-            # Parse the content to get a list of proxy entries.
-            proxies_list = parse_subscription_content(content)
-
-            # For each proxy, test it as indicated by TEST_TYPE.
-            for proxy in proxies_list:
-                is_valid = True
-                if "tcp" in TEST_TYPE:
-                    if not test_proxy_tcp(proxy):
-                        is_valid = False
-                if "http" in TEST_TYPE:
-                    if not test_proxy_http(proxy):
-                        is_valid = False
-                if is_valid:
-                    valid_proxies.append(proxy)
-            break  # Exit after a successful fetch and parse.
-        except Exception as e:
-            if attempt < RETRY_COUNT:
-                # Optional: Log a warning and retry.
-                print(f"Attempt {attempt+1} failed for URL {url}: {e}. Retrying...")
-                time.sleep(2)
-            else:
-                print(f"Failed to fetch or parse subscription from {url} after {RETRY_COUNT+1} attempts: {e}")
-    return valid_proxies
 
 # ---------------------------
 # Parsing Warp/WireGuard links (Thread-safe)
@@ -286,25 +172,27 @@ def parse_config_url1_2(content: str, all_tags: set) -> List[Dict[str, Any]]:
                     ss_url_encoded, frag = ss_url_encoded.split("#", 1)
                 if "@" in ss_url_encoded:
                     base64_str = ss_url_encoded.split("@")[0]
-                    method_pass_decoded = robust_b64decode(base64_str)
-                    if not method_pass_decoded:
-                        continue
+                    padding = "=" * (-len(base64_str) % 4)
+                    method_pass_decoded = base64.urlsafe_b64decode(base64_str + padding).decode("utf-8")
                     if ":" in method_pass_decoded:
                         method, password = method_pass_decoded.split(":", 1)
                     else:
                         method, password = None, None
-                    remainder = ss_url_encoded.split("@", 1)[1]
+                    remainder = ss_url_encoded.split("@")[1]
                     server_port_str = remainder.split("?")[0].split("#")[0]
                 else:
-                    decoded_full = robust_b64decode(ss_url_encoded)
-                    if not decoded_full or "@" not in decoded_full:
+                    padding = "=" * (-len(ss_url_encoded) % 4)
+                    decoded_full = base64.urlsafe_b64decode(ss_url_encoded + padding).decode("utf-8")
+                    if "@" in decoded_full:
+                        method_pass, server_port_str = decoded_full.split("@", 1)
+                        if ":" in method_pass:
+                            method, password = method_pass.split(":", 1)
+                        else:
+                            method, password = None, None
+                    else:
                         print(f"Thread {os.getpid()}: Invalid Shadowsocks link (missing '@'): {line}")
                         continue
-                    method_pass, server_port_str = decoded_full.split("@", 1)
-                    if ":" in method_pass:
-                        method, password = method_pass.split(":", 1)
-                    else:
-                        method, password = None, None
+
                 if server_port_str:
                     parts = server_port_str.split(":")
                     server = parts[0]
@@ -315,6 +203,7 @@ def parse_config_url1_2(content: str, all_tags: set) -> List[Dict[str, Any]]:
                     parsed_url = urllib.parse.urlparse(line)
                     server = parsed_url.hostname
                     port = parsed_url.port if parsed_url.port else 443
+
                 tag = generate_unique_tag(all_tags)
                 ss_outbound = {
                     "type": "shadowsocks",
@@ -886,28 +775,71 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
     print("Exiting single_test_pass")
 
 # ---------------------------
+# Saving configuration as Base64-encoded output (Thread-safe)
+# ---------------------------
+def save_config(config: Dict[str, Any], filepath: str = "merge_config.json"):
+    try:
+        # Remove testing and source metadata.
+        for outbound in config.get("outbounds", []):
+            if "udp_delay" in outbound:
+                del outbound["udp_delay"]
+            if "tcp_delay" in outbound:
+                del outbound["tcp_delay"]
+            if "http_delay" in outbound:
+                del outbound["http_delay"]
+            if "source" in outbound:
+                del outbound["source"]
+        final_json_str = json.dumps(config, indent=2)
+        final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
+        with open(filepath, "w") as outfile:
+            outfile.write(final_encoded)
+        print(f"Merged config saved to {filepath} (base64 encoded)")
+    except Exception as e:
+        print(f"Error saving config to {filepath}: {e}")
+
+# ---------------------------
+# Fetch and parse subscription URLs in Threads.
+# Each outbound is annotated with its source URL.
+# ---------------------------
+def fetch_and_parse_subscription_thread(url: str, proxy: Optional[str] = None, all_tags: set = None) -> List[Dict[str, Any]]:
+    print(f"Thread {os.getpid()}: Fetching and parsing: {url}")
+    content = fetch_content(url, proxy)
+    if content:
+        normalized_content = content.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+        try:
+            decoded_possible = base64.b64decode(normalized_content, validate=True).decode("utf-8")
+            content = decoded_possible
+        except Exception:
+            pass
+        outbounds_list = parse_config_url1_2(content, all_tags)
+        for outbound in outbounds_list:
+            outbound["source"] = url
+        if outbounds_list:
+            print(f"Thread {os.getpid()}: Parsed {len(outbounds_list)} outbounds from {url}")
+            return outbounds_list
+        else:
+            print(f"Thread {os.getpid()}: No outbounds parsed from {url}")
+            return []
+    else:
+        print(f"Thread {os.getpid()}: Failed to fetch content from {url}, skipping.")
+        return []
+
+# ---------------------------
 # Main function
 # ---------------------------
 def main():
     global is_ctrl_c_pressed
     signal.signal(signal.SIGINT, signal_handler)
-    parser = argparse.ArgumentParser(description="Pr0xySh4rk Hiddify Config Merger - Multi-threaded")
+    parser = argparse.ArgumentParser(description="Pr0xySh4rk Hiddify Config Merger - Multi-threaded (Base64 encoded output only)")
     parser.add_argument("--input", required=True, help="Input subscription file (base64 or plain text with URLs)")
-    parser.add_argument("--output", required=True, help="Output configuration file path")
+    parser.add_argument("--output", required=True, help="Output configuration file path (will contain Base64 encoded config)")
     parser.add_argument("--proxy", help="Optional proxy for fetching subscription URLs (e.g., 'http://127.0.0.1:1080')")
     parser.add_argument("--threads", type=int, default=32, help="Number of threads to use for fetching/testing (default: 32)")
     parser.add_argument("--test-proxy", help="Optional proxy to use for HTTP testing outbounds (e.g., 'http://127.0.0.1:1080')")
     parser.add_argument("-r", "--repetitions", type=int, default=5, help="Number of test repetitions (HTTP) per outbound (default: 5)")
     parser.add_argument("--test", choices=["tcp", "udp", "http", "tcp+http"], default="http",
                         help="Specify which test(s) to run. 'tcp+http' runs a two-pass test (TCP then HTTP).")
-    # Output in Base64 by default; use --no-base64 to output plain text.
-    parser.add_argument("--no-base64", action="store_false", dest="base64_encode",
-                        help="Output final config in plain text instead of Base64")
-    parser.set_defaults(base64_encode=True)
     args = parser.parse_args()
-
-    # Decode the output filename in case it was URL encoded.
-    args.output = urllib.parse.unquote(args.output)
 
     # Remove environment proxy settings
     original_env = {}
@@ -1040,12 +972,7 @@ def main():
 
     if not subscription_urls:
         print("No subscription URLs found.")
-        final_json_str = json.dumps(base_config_template, indent=2)
-        if args.base64_encode:
-            final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-        else:
-            final_output = final_json_str
-        print(final_output)
+        save_config(base_config_template, filepath=args.output)
         return
 
     all_tags = set()
@@ -1062,12 +989,7 @@ def main():
                 parsed_outbounds_lists.append(result)
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after fetching.")
-            final_json_str = json.dumps(base_config_template, indent=2)
-            if args.base64_encode:
-                final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-            else:
-                final_output = final_json_str
-            print(final_output)
+            save_config(base_config_template, filepath=args.output)
             sys.exit(0)
 
     all_parsed_outbounds = [ob for sublist in parsed_outbounds_lists for ob in sublist]
@@ -1076,45 +998,37 @@ def main():
     all_parsed_outbounds = deduplicate_outbounds(all_parsed_outbounds)
     print(f"Total unique outbounds after deduplication: {len(all_parsed_outbounds)}")
 
+    # If test mode is tcp+http, perform a two-pass test:
     if args.test == "tcp+http":
         print("\n=== First pass: TCP test ===")
         single_test_pass(all_parsed_outbounds, "tcp", args.threads, args.test_proxy, args.repetitions)
         survivors_tcp = [ob for ob in all_parsed_outbounds if ob.get("tcp_delay", float('inf')) != float('inf')]
         print(f"{len(survivors_tcp)} outbounds passed the TCP test. Proceeding to HTTP test...")
+
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after first pass.")
-            final_json_str = json.dumps(base_config_template, indent=2)
-            if args.base64_encode:
-                final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-            else:
-                final_output = final_json_str
-            print(final_output)
+            save_config(base_config_template, filepath=args.output)
             sys.exit(0)
+
         print("\n=== Second pass: HTTP test ===")
         single_test_pass(survivors_tcp, "http", args.threads, args.test_proxy, args.repetitions)
         survivors_http = [ob for ob in survivors_tcp if ob.get("http_delay", float('inf')) != float('inf')]
         print(f"{len(survivors_http)} outbounds passed both TCP and HTTP tests.")
+
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after second pass.")
-            final_json_str = json.dumps(base_config_template, indent=2)
-            if args.base64_encode:
-                final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-            else:
-                final_output = final_json_str
-            print(final_output)
+            save_config(base_config_template, filepath=args.output)
             sys.exit(0)
+
         all_parsed_outbounds = filter_best_outbounds_by_protocol(survivors_http)
         print(f"Total outbounds after filtering best per protocol: {len(all_parsed_outbounds)}")
+
     else:
+        # Single-pass test mode: tcp, udp, or http.
         single_test_pass(all_parsed_outbounds, args.test, args.threads, args.test_proxy, args.repetitions)
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after testing.")
-            final_json_str = json.dumps(base_config_template, indent=2)
-            if args.base64_encode:
-                final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-            else:
-                final_output = final_json_str
-            print(final_output)
+            save_config(base_config_template, filepath=args.output)
             sys.exit(0)
         if args.test == "tcp":
             all_parsed_outbounds = [ob for ob in all_parsed_outbounds if ob.get("tcp_delay", float('inf')) != float('inf')]
@@ -1127,21 +1041,10 @@ def main():
         print(f"Total outbounds after filtering best per protocol: {len(all_parsed_outbounds)}")
 
     merged_config = replace_existing_outbounds(base_config_template.copy(), all_parsed_outbounds)
-    final_json_str = json.dumps(merged_config, indent=2)
-    if args.base64_encode:
-        final_output = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
-    else:
-        final_output = final_json_str
-
-    if args.output:
-        try:
-            with open(args.output, "w") as f:
-                f.write(final_output)
-            print(f"Config written to {args.output}")
-        except Exception as e:
-            print(f"Error writing to output file: {e}")
-    else:
-        print(final_output)
+    try:
+        save_config(merged_config, filepath=args.output)
+    except Exception as e:
+        print(f"Error writing to output file: {e}")
 
     for var, value in original_env.items():
         os.environ[var] = value
