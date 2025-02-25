@@ -3,7 +3,7 @@ name: Pr0xySh4rk24 Daily Config Update
 on:
   schedule:
     - cron: '0 0 * * *'  # Runs every day at midnight UTC; adjust as needed.
-  workflow_dispatch:
+  workflow_dispatch:  # Allows manual trigger if desired.
 
 jobs:
   update-config:
@@ -12,7 +12,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
         with:
-          persist-credentials: false
+          persist-credentials: false  # To allow pushing with GITHUB_TOKEN
 
       - name: Set up Python 3.x
         uses: actions/setup-python@v4
@@ -29,14 +29,9 @@ jobs:
           python pr0xySh4rk24.py --input subs.txt --output '🔒 Pr0xySh4rk 🦈.txt' -r 5 --test tcp+http
 
       - name: Commit and Push Changes
-        env:
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
-          git fetch origin main
-          git pull --rebase origin main
           git add '🔒 Pr0xySh4rk 🦈.txt'
           if ! git diff --cached --quiet; then
             git commit -m "Update '🔒 Pr0xySh4rk 🦈.txt' via GitHub Actions"
