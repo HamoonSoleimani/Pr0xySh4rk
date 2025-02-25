@@ -13,6 +13,14 @@ import signal
 import sys
 from typing import List, Dict, Optional, Any
 
+def robust_b64decode(data: str) -> Optional[str]:
+    try:
+        padding = "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(data + padding).decode("utf-8")
+    except Exception as decode_error:
+        print(f"Thread {os.getpid()}: Base64 decoding error: {decode_error} - Data: {data}")
+        return None
+
 # --- Configuration ---
 TEST_URL = "https://google.com"  # Define test URL here for easy changing
 
@@ -172,27 +180,25 @@ def parse_config_url1_2(content: str, all_tags: set) -> List[Dict[str, Any]]:
                     ss_url_encoded, frag = ss_url_encoded.split("#", 1)
                 if "@" in ss_url_encoded:
                     base64_str = ss_url_encoded.split("@")[0]
-                    padding = "=" * (-len(base64_str) % 4)
-                    method_pass_decoded = base64.urlsafe_b64decode(base64_str + padding).decode("utf-8")
+                    method_pass_decoded = robust_b64decode(base64_str)
+                    if not method_pass_decoded:
+                        continue
                     if ":" in method_pass_decoded:
                         method, password = method_pass_decoded.split(":", 1)
                     else:
                         method, password = None, None
-                    remainder = ss_url_encoded.split("@")[1]
+                    remainder = ss_url_encoded.split("@", 1)[1]
                     server_port_str = remainder.split("?")[0].split("#")[0]
                 else:
-                    padding = "=" * (-len(ss_url_encoded) % 4)
-                    decoded_full = base64.urlsafe_b64decode(ss_url_encoded + padding).decode("utf-8")
-                    if "@" in decoded_full:
-                        method_pass, server_port_str = decoded_full.split("@", 1)
-                        if ":" in method_pass:
-                            method, password = method_pass.split(":", 1)
-                        else:
-                            method, password = None, None
-                    else:
+                    decoded_full = robust_b64decode(ss_url_encoded)
+                    if not decoded_full or "@" not in decoded_full:
                         print(f"Thread {os.getpid()}: Invalid Shadowsocks link (missing '@'): {line}")
                         continue
-
+                    method_pass, server_port_str = decoded_full.split("@", 1)
+                    if ":" in method_pass:
+                        method, password = method_pass.split(":", 1)
+                    else:
+                        method, password = None, None
                 if server_port_str:
                     parts = server_port_str.split(":")
                     server = parts[0]
@@ -203,7 +209,6 @@ def parse_config_url1_2(content: str, all_tags: set) -> List[Dict[str, Any]]:
                     parsed_url = urllib.parse.urlparse(line)
                     server = parsed_url.hostname
                     port = parsed_url.port if parsed_url.port else 443
-
                 tag = generate_unique_tag(all_tags)
                 ss_outbound = {
                     "type": "shadowsocks",
@@ -1081,7 +1086,6 @@ def main():
             print(f"Error writing to output file: {e}")
     else:
         print(output_content)
-
 
     for var, value in original_env.items():
         os.environ[var] = value
