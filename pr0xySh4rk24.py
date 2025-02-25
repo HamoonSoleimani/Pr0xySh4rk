@@ -2,6 +2,7 @@
 import argparse
 import base64
 import concurrent.futures
+import copy
 import json
 import re
 import socket
@@ -14,7 +15,7 @@ import sys
 from typing import List, Dict, Optional, Any
 
 # --- Configuration ---
-TEST_URL = "https://www.pinging.net/"  # Define test URL here for easy changing
+TEST_URL = "https://speedtest.ir"  # Define test URL here for easy changing
 
 # Global variables for progress tracking and Ctrl+C handling
 total_outbounds_count = 0
@@ -776,9 +777,9 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
 
 # ---------------------------
 # Saving configuration (Thread-safe)
-# Always saves config in base64 encoded format
+# Saves config in Base64 encoded format by default unless --no-base64 is specified.
 # ---------------------------
-def save_config(config: Dict[str, Any], filepath: str = "merge_config.json"):
+def save_config(config: Dict[str, Any], filepath: str = "merge_config.json", base64_encode: bool = True):
     try:
         for outbound in config.get("outbounds", []):
             outbound.pop("udp_delay", None)
@@ -786,10 +787,15 @@ def save_config(config: Dict[str, Any], filepath: str = "merge_config.json"):
             outbound.pop("http_delay", None)
             outbound.pop("source", None)
         final_json_str = json.dumps(config, indent=2)
-        final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
+        if base64_encode:
+            final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
+            output_content = final_encoded
+            print(f"Merged config saved to {filepath} (base64 encoded).")
+        else:
+            output_content = final_json_str
+            print(f"Merged config saved to {filepath} (plain text).")
         with open(filepath, "w") as outfile:
-            outfile.write(final_encoded)
-        print(f"Merged config saved to {filepath} (base64 encoded).")
+            outfile.write(output_content)
     except Exception as e:
         print(f"Error saving config to {filepath}: {e}")
 
@@ -877,7 +883,9 @@ def main():
     parser.add_argument("-r", "--repetitions", type=int, default=5, help="Number of test repetitions (HTTP) per outbound (default: 5)")
     parser.add_argument("--test", choices=["tcp", "udp", "http", "tcp+http"], default="http",
                         help="Specify which test(s) to run. 'tcp+http' runs a two-pass test (TCP then HTTP).")
-    # Always output final config in Base64 (removed --no-base64 option)
+    parser.add_argument("--no-base64", action="store_false", dest="base64_encode",
+                        help="Output final config in plain text instead of Base64")
+    parser.set_defaults(base64_encode=True)
     args = parser.parse_args()
 
     # Remove environment proxy settings
@@ -1011,7 +1019,7 @@ def main():
 
     if not subscription_urls:
         print("No subscription URLs found.")
-        save_config(base_config_template, filepath=args.output)
+        save_config(base_config_template, filepath=args.output, base64_encode=args.base64_encode)
         return
 
     all_tags = set()
@@ -1028,7 +1036,7 @@ def main():
                 parsed_outbounds_lists.append(result)
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after fetching.")
-            save_config(base_config_template, filepath=args.output)
+            save_config(base_config_template, filepath=args.output, base64_encode=args.base64_encode)
             sys.exit(0)
 
     all_parsed_outbounds = [ob for sublist in parsed_outbounds_lists for ob in sublist]
@@ -1046,7 +1054,7 @@ def main():
 
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after first pass.")
-            save_config(base_config_template, filepath=args.output)
+            save_config(base_config_template, filepath=args.output, base64_encode=args.base64_encode)
             sys.exit(0)
 
         print("\n=== Second pass: HTTP test ===")
@@ -1056,7 +1064,7 @@ def main():
 
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after second pass.")
-            save_config(base_config_template, filepath=args.output)
+            save_config(base_config_template, filepath=args.output, base64_encode=args.base64_encode)
             sys.exit(0)
 
         all_parsed_outbounds = filter_best_outbounds_by_protocol(survivors_http)
@@ -1067,7 +1075,7 @@ def main():
         single_test_pass(all_parsed_outbounds, args.test, args.threads, args.test_proxy, args.repetitions)
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after testing.")
-            save_config(base_config_template, filepath=args.output)
+            save_config(base_config_template, filepath=args.output, base64_encode=args.base64_encode)
             sys.exit(0)
         if args.test == "tcp":
             all_parsed_outbounds = [ob for ob in all_parsed_outbounds if ob.get("tcp_delay", float('inf')) != float('inf')]
@@ -1079,9 +1087,10 @@ def main():
         all_parsed_outbounds = filter_best_outbounds_by_protocol(all_parsed_outbounds)
         print(f"Total outbounds after filtering best per protocol: {len(all_parsed_outbounds)}")
 
-    merged_config = replace_existing_outbounds(base_config_template.copy(), all_parsed_outbounds)
+    # Use a deep copy of the base config template to avoid unintended modifications
+    merged_config = replace_existing_outbounds(copy.deepcopy(base_config_template), all_parsed_outbounds)
     merged_config = rename_outbound_tags(merged_config)
-    save_config(merged_config, filepath=args.output)
+    save_config(merged_config, filepath=args.output, base64_encode=args.base64_encode)
 
     for var, value in original_env.items():
         os.environ[var] = value
