@@ -35,11 +35,11 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
+          git fetch origin main
+          git pull --rebase origin main
           git add '🔒 Pr0xySh4rk 🦈.txt'
           if ! git diff --cached --quiet; then
             git commit -m "Update '🔒 Pr0xySh4rk 🦈.txt' via GitHub Actions"
-            git fetch origin main
-            git rebase origin/main
             git push origin HEAD:main
           else
             echo "No changes to commit."
