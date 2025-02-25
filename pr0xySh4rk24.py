@@ -29,6 +29,10 @@ total_outbounds_count = 0
 completed_outbounds_count = 0
 is_ctrl_c_pressed = False
 
+# Global variables that are set in main() and used in the thread worker function.
+RETRY_COUNT = 3
+TEST_TYPE = "tcp+http"
+
 # ---------------------------
 # Helper: Generate unique Pr0xySh4rk-formatted tag
 # ---------------------------
@@ -73,6 +77,108 @@ def fetch_content(url: str, proxy: Optional[str] = None) -> Optional[str]:
         error_message = str(e)
         print(f"Thread {os.getpid()}: Error fetching URL {url}{' via proxy ' + proxy if proxy else ''}: {error_type} - {error_message}")
         return None
+
+def parse_subscription_content(content):
+    """
+    Parses the subscription content (a string) and returns a list of proxy entries.
+    In this example, each non-empty line is assumed to represent one proxy entry.
+    """
+    proxies = []
+    for line in content.splitlines():
+        line = line.strip()
+        if line:
+            proxies.append(line)
+    return proxies
+
+def test_proxy_tcp(proxy):
+    """
+    Tests if the proxy is reachable via a TCP connection.
+    The proxy is assumed to be in the format "host:port".
+    """
+    try:
+        host, port = proxy.split(':')
+        port = int(port)
+        sock = socket.create_connection((host, port), timeout=5)
+        sock.close()
+        return True
+    except Exception as e:
+        return False
+
+def test_proxy_http(proxy):
+    """
+    Tests if the proxy can perform an HTTP GET request.
+    The proxy is assumed to be in the format "host:port".
+    """
+    try:
+        http_proxies = {
+            "http": f"http://{proxy}",
+            "https": f"http://{proxy}",
+        }
+        response = requests.get("http://example.com", proxies=http_proxies, timeout=5)
+        return response.status_code == 200
+    except Exception as e:
+        return False
+
+def fetch_and_parse_subscription_thread(url, proxy_arg, all_tags):
+    """
+    Worker function for the thread pool.
+    It fetches the subscription URL using the optional proxy, decodes the response
+    (if necessary), parses the proxy entries, and tests each entry according to TEST_TYPE.
+
+    Args:
+        url (str): The subscription URL to fetch.
+        proxy_arg (str): Optional proxy to use for fetching the URL.
+        all_tags (list): A shared list that can be used to aggregate tags (if needed).
+
+    Returns:
+        list: A list of valid proxy entries fetched and tested from the subscription.
+    """
+    global RETRY_COUNT, TEST_TYPE
+    valid_proxies = []
+    for attempt in range(RETRY_COUNT + 1):
+        try:
+            # Use the provided proxy to fetch the subscription if specified.
+            proxies = None
+            if proxy_arg:
+                proxies = {
+                    "http": proxy_arg,
+                    "https": proxy_arg,
+                }
+            response = requests.get(url, proxies=proxies, timeout=10)
+            response.raise_for_status()
+            content = response.text.strip()
+
+            # Try decoding the content as base64.
+            try:
+                decoded_content = base64.b64decode(content).decode("utf-8")
+                content = decoded_content
+            except Exception:
+                # If decoding fails, assume the content is plain text.
+                pass
+
+            # Parse the content to get a list of proxy entries.
+            proxies_list = parse_subscription_content(content)
+
+            # For each proxy, test it as indicated by TEST_TYPE.
+            for proxy in proxies_list:
+                is_valid = True
+                if "tcp" in TEST_TYPE:
+                    if not test_proxy_tcp(proxy):
+                        is_valid = False
+                if "http" in TEST_TYPE:
+                    if not test_proxy_http(proxy):
+                        is_valid = False
+                if is_valid:
+                    valid_proxies.append(proxy)
+            break  # Exit after a successful fetch and parse.
+        except Exception as e:
+            if attempt < RETRY_COUNT:
+                # Optional: Log a warning and retry.
+                print(f"Attempt {attempt+1} failed for URL {url}: {e}. Retrying...")
+                time.sleep(2)
+            else:
+                print(f"Failed to fetch or parse subscription from {url} after {RETRY_COUNT+1} attempts: {e}")
+    return valid_proxies
 
 # ---------------------------
 # Parsing Warp/WireGuard links (Thread-safe)
