@@ -973,7 +973,12 @@ def main():
 
     if not subscription_urls:
         print("No subscription URLs found.")
-        save_config(base_config_template, filepath=args.output)
+        if args.base64_encode:
+            final_json_str = json.dumps(base_config_template, indent=2)
+            final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
+            print(final_encoded)
+        else:
+            print(json.dumps(base_config_template, indent=2))
         return
 
     all_tags = set()
@@ -990,7 +995,12 @@ def main():
                 parsed_outbounds_lists.append(result)
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after fetching.")
-            save_config(base_config_template, filepath=args.output)
+            if args.base64_encode:
+                final_json_str = json.dumps(base_config_template, indent=2)
+                final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
+                print(final_encoded)
+            else:
+                print(json.dumps(base_config_template, indent=2))
             sys.exit(0)
 
     all_parsed_outbounds = [ob for sublist in parsed_outbounds_lists for ob in sublist]
@@ -1008,7 +1018,12 @@ def main():
 
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after first pass.")
-            save_config(base_config_template, filepath=args.output)
+            if args.base64_encode:
+                final_json_str = json.dumps(base_config_template, indent=2)
+                final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
+                print(final_encoded)
+            else:
+                print(json.dumps(base_config_template, indent=2))
             sys.exit(0)
 
         print("\n=== Second pass: HTTP test ===")
@@ -1018,7 +1033,12 @@ def main():
 
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after second pass.")
-            save_config(base_config_template, filepath=args.output)
+            if args.base64_encode:
+                final_json_str = json.dumps(base_config_template, indent=2)
+                final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
+                print(final_encoded)
+            else:
+                print(json.dumps(base_config_template, indent=2))
             sys.exit(0)
 
         all_parsed_outbounds = filter_best_outbounds_by_protocol(survivors_http)
@@ -1029,7 +1049,12 @@ def main():
         single_test_pass(all_parsed_outbounds, args.test, args.threads, args.test_proxy, args.repetitions)
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C after testing.")
-            save_config(base_config_template, filepath=args.output)
+            if args.base64_encode:
+                final_json_str = json.dumps(base_config_template, indent=2)
+                final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
+                print(final_encoded)
+            else:
+                print(json.dumps(base_config_template, indent=2))
             sys.exit(0)
         if args.test == "tcp":
             all_parsed_outbounds = [ob for ob in all_parsed_outbounds if ob.get("tcp_delay", float('inf')) != float('inf')]
@@ -1049,10 +1074,14 @@ def main():
     else:
         output_content = final_json_str
 
-    try:
-        save_config(merged_config, filepath=args.output)
-    except Exception as e:
-        print(f"Error writing to output file: {e}")
+    if args.output:
+        try:
+            save_config(merged_config, filepath=args.output)
+        except Exception as e:
+            print(f"Error writing to output file: {e}")
+    else:
+        print(output_content)
+
 
     for var, value in original_env.items():
         os.environ[var] = value
