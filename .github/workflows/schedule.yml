@@ -38,14 +38,8 @@ jobs:
           git add configsbase64.txt
           if ! git diff --cached --quiet; then
             git commit -m "Update configsbase64.txt via GitHub Actions"
-
-            # Fetch latest changes from remote
             git fetch origin main
-
-            # Rebase your local branch onto the fetched remote branch
             git rebase origin/main
-
-            # Push the rebased changes
             git push origin HEAD:main
           else
             echo "No changes to commit."
