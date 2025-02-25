@@ -14,7 +14,7 @@ import sys
 from typing import List, Dict, Optional, Any
 
 # --- Configuration ---
-TEST_URL = "https://speedtest.ir"  # The URL used in HTTP tests
+TEST_URL = "https://google.com"  # The URL used in HTTP tests
 
 # Global variables for progress tracking and Ctrl+C handling
 total_outbounds_count = 0
