@@ -15,7 +15,7 @@ import sys
 from typing import List, Dict, Optional, Any
 
 # --- Configuration ---
-TEST_URL = "https://speedtest.ir"  # Define test URL here for easy changing
+TEST_URL = "https://www.pinging.net/"  # Define test URL here for easy changing
 
 # Global variables for progress tracking and Ctrl+C handling
 total_outbounds_count = 0
