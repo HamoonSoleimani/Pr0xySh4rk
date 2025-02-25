@@ -26,7 +26,7 @@ jobs:
 
       - name: Run Pr0xySh4rk24 Script
         run: |
-          python pr0xySh4rk24.py --input subs.txt --output '🔒 Pr0xySh4rk 🦈.txt' -r 5 --test tcp+http
+          python pr0xySh4rk24.py --input subs.txt --output Pr0xySh4rk.txt -r 5 --test tcp+http
 
       - name: Commit and Push Changes
         env:
@@ -37,9 +37,9 @@ jobs:
           git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
           git fetch origin main
           git pull --rebase origin main
-          git add '🔒 Pr0xySh4rk 🦈.txt'
+          git add Pr0xySh4rk.txt
           if ! git diff --cached --quiet; then
-            git commit -m "Update '🔒 Pr0xySh4rk 🦈.txt' via GitHub Actions"
+            git commit -m "Update Pr0xySh4rk.txt via GitHub Actions"
             git push origin HEAD:main
           else
             echo "No changes to commit."
