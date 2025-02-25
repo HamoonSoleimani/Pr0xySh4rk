@@ -14,7 +14,7 @@ import sys
 from typing import List, Dict, Optional, Any
 
 # --- Configuration ---
-TEST_URL = "https://google.com"  # Define test URL here for easy changing
+TEST_URL = "https://www.pinging.net/"  # Define test URL here for easy changing
 
 # Global variables for progress tracking and Ctrl+C handling
 total_outbounds_count = 0
@@ -22,7 +22,7 @@ completed_outbounds_count = 0
 is_ctrl_c_pressed = False
 
 # ---------------------------
-# Helper: Generate unique Pr0xySh4rk-formatted tag
+# Helper: Generate unique Pr0xySh4rk-formatted tag (used only in parsing phase)
 # ---------------------------
 def generate_unique_tag(all_tags: set) -> str:
     base_tag = "🔒Pr0xySh4rk🦈"
@@ -775,27 +775,65 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
     print("Exiting single_test_pass")
 
 # ---------------------------
-# Saving configuration as Base64-encoded output (Thread-safe)
+# Saving configuration (Thread-safe)
+# Always saves config in base64 encoded format
 # ---------------------------
 def save_config(config: Dict[str, Any], filepath: str = "merge_config.json"):
     try:
-        # Remove testing and source metadata.
         for outbound in config.get("outbounds", []):
-            if "udp_delay" in outbound:
-                del outbound["udp_delay"]
-            if "tcp_delay" in outbound:
-                del outbound["tcp_delay"]
-            if "http_delay" in outbound:
-                del outbound["http_delay"]
-            if "source" in outbound:
-                del outbound["source"]
+            outbound.pop("udp_delay", None)
+            outbound.pop("tcp_delay", None)
+            outbound.pop("http_delay", None)
+            outbound.pop("source", None)
         final_json_str = json.dumps(config, indent=2)
         final_encoded = base64.b64encode(final_json_str.encode("utf-8")).decode("utf-8")
         with open(filepath, "w") as outfile:
             outfile.write(final_encoded)
-        print(f"Merged config saved to {filepath} (base64 encoded)")
+        print(f"Merged config saved to {filepath} (base64 encoded).")
     except Exception as e:
         print(f"Error saving config to {filepath}: {e}")
+
+# ---------------------------
+# Renaming outbound tags according to protocol with counter (max 50)
+# ---------------------------
+def rename_outbound_tags(config: Dict[str, Any]) -> Dict[str, Any]:
+    protocol_abbr = {
+        "shadowsocks": "SS",
+        "vless": "VL",
+        "vmess": "VM",
+        "trojan": "TJ",
+        "tuic": "TU",
+        "wireguard": "WG",
+        "warp": "WG",
+        "hysteria": "HY",
+        "hysteria2": "HY",
+        "hy2": "HY",
+        "reality": "RT"
+    }
+    tag_mapping = {}
+    protocol_groups = {}
+    for ob in config.get("outbounds", []):
+        typ = ob.get("type")
+        if typ in ("selector", "urltest", "dns", "direct", "block"):
+            continue
+        abbr = protocol_abbr.get(typ)
+        if abbr:
+            protocol_groups.setdefault(typ, []).append(ob)
+    for typ, group in protocol_groups.items():
+        abbr = protocol_abbr.get(typ, "XX")
+        limited = group[:50]  # ensure maximum 50 outbounds per protocol
+        for i, ob in enumerate(limited, start=1):
+            new_tag = f"🔒Pr0xySh4rk🦈{abbr}{i:02d}"
+            tag_mapping[ob["tag"]] = new_tag
+            ob["tag"] = new_tag
+    # Update tags in selector and urltest outbounds
+    for ob in config.get("outbounds", []):
+        if ob.get("type") in ("selector", "urltest"):
+            new_list = []
+            for tag in ob.get("outbounds", []):
+                new_list.append(tag_mapping.get(tag, tag))
+            ob["outbounds"] = new_list
+    return config
 
 # ---------------------------
 # Fetch and parse subscription URLs in Threads.
@@ -830,15 +868,16 @@ def fetch_and_parse_subscription_thread(url: str, proxy: Optional[str] = None, a
 def main():
     global is_ctrl_c_pressed
     signal.signal(signal.SIGINT, signal_handler)
-    parser = argparse.ArgumentParser(description="Pr0xySh4rk Hiddify Config Merger - Multi-threaded (Base64 encoded output only)")
+    parser = argparse.ArgumentParser(description="Pr0xySh4rk Hiddify Config Merger - Multi-threaded")
     parser.add_argument("--input", required=True, help="Input subscription file (base64 or plain text with URLs)")
-    parser.add_argument("--output", required=True, help="Output configuration file path (will contain Base64 encoded config)")
+    parser.add_argument("--output", required=True, help="Output configuration file path")
     parser.add_argument("--proxy", help="Optional proxy for fetching subscription URLs (e.g., 'http://127.0.0.1:1080')")
     parser.add_argument("--threads", type=int, default=32, help="Number of threads to use for fetching/testing (default: 32)")
     parser.add_argument("--test-proxy", help="Optional proxy to use for HTTP testing outbounds (e.g., 'http://127.0.0.1:1080')")
     parser.add_argument("-r", "--repetitions", type=int, default=5, help="Number of test repetitions (HTTP) per outbound (default: 5)")
     parser.add_argument("--test", choices=["tcp", "udp", "http", "tcp+http"], default="http",
                         help="Specify which test(s) to run. 'tcp+http' runs a two-pass test (TCP then HTTP).")
+    # Always output final config in Base64 (removed --no-base64 option)
     args = parser.parse_args()
 
     # Remove environment proxy settings
@@ -1041,10 +1080,8 @@ def main():
         print(f"Total outbounds after filtering best per protocol: {len(all_parsed_outbounds)}")
 
     merged_config = replace_existing_outbounds(base_config_template.copy(), all_parsed_outbounds)
-    try:
-        save_config(merged_config, filepath=args.output)
-    except Exception as e:
-        print(f"Error writing to output file: {e}")
+    merged_config = rename_outbound_tags(merged_config)
+    save_config(merged_config, filepath=args.output)
 
     for var, value in original_env.items():
         os.environ[var] = value
