@@ -27,7 +27,7 @@ jobs:
       - name: Run Pr0xySh4rk24 Script
         run: |
           python pr0xySh4rk24.py --input subs.txt --output '🔒 Pr0xySh4rk 🦈.txt' -r 5 --test tcp+http
-      
+
       - name: Commit and Push Changes
         env:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
