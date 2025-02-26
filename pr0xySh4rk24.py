@@ -159,7 +159,7 @@ def parse_config_url1_2(content: str, all_tags: set) -> List[Dict[str, Any]]:
     except:
         pass
 
-    # Legacy link parsing follows:
+    # Legacy link parsing:
     for line in content.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("//"):
@@ -219,7 +219,8 @@ def parse_config_url1_2(content: str, all_tags: set) -> List[Dict[str, Any]]:
                 print(f"Thread {os.getpid()}: Error parsing Shadowsocks link: {e} - Link: {line}")
                 continue
 
-        elif line.startswith(("vless://", "vmess://", "trojan://", "tuic://",
+        # Trojan support removed.
+        elif line.startswith(("vless://", "vmess://", "tuic://",
                               "hysteria://", "hysteria2://", "hy2://", "warp://", "wireguard://")):
             protocol = line.split("://")[0]
             print(f"Thread {os.getpid()}: Protocol detected: {protocol}")
@@ -309,36 +310,6 @@ def parse_config_url1_2(content: str, all_tags: set) -> List[Dict[str, Any]]:
                 except Exception as e:
                     print(f"Thread {os.getpid()}: Error parsing vmess link: {e} - Link: {line}")
                     continue
-
-            elif protocol == "trojan":
-                parsed_url = urllib.parse.urlparse(line)
-                password = parsed_url.username
-                netloc = parsed_url.netloc
-                server_port_str = netloc.split("@")[-1] if "@" in netloc else netloc
-                if "[" in server_port_str and "]" in server_port_str:
-                    server_ipv6 = server_port_str[server_port_str.find("[") + 1:server_port_str.find("]")]
-                    server = server_ipv6
-                    port_str = server_port_str.split("]")[-1].strip(":")
-                    port = int(port_str) if port_str.isdigit() else 443
-                else:
-                    server = server_port_str.split(":")[0]
-                    port = int(server_port_str.split(":")[1]) if (":" in server_port_str and server_port_str.split(":")[1].isdigit()) else 443
-                params = urllib.parse.parse_qs(parsed_url.query)
-                tag = generate_unique_tag(all_tags)
-                trojan_outbound = {
-                    "type": "trojan",
-                    "tag": tag,
-                    "server": server,
-                    "server_port": port,
-                    "password": password,
-                }
-                if params.get("security", [""])[0] == "tls":
-                    trojan_outbound["tls"] = {
-                        "enabled": True,
-                        "server_name": params.get("sni", [server])[0],
-                        "alpn": params.get("alpn", [])
-                    }
-                outbounds.append(trojan_outbound)
 
             elif protocol == "tuic":
                 parsed_url = urllib.parse.urlparse(line)
@@ -433,7 +404,7 @@ def deduplicate_outbounds(outbounds: List[Dict[str, Any]]) -> List[Dict[str, Any
         elif typ in ("vless", "vmess"):
             uuid = ob.get("uuid", "")
             return (typ, server, port, uuid)
-        elif typ in ("trojan", "tuic", "reality"):
+        elif typ in ("tuic", "reality"):
             pwd = ob.get("password", "")
             if typ == "tuic":
                 uuid = ob.get("uuid", "")
@@ -462,9 +433,9 @@ def deduplicate_outbounds(outbounds: List[Dict[str, Any]]) -> List[Dict[str, Any
     return list(unique.values())
 
 # ---------------------------
-# Diversify outbounds if there are more than 50 for a protocol
+# Diversify outbounds if there are more than 75 for a protocol
 # ---------------------------
-def diversify_outbounds_by_protocol(protocol_outbounds: List[Dict[str, Any]], limit: int = 50) -> List[Dict[str, Any]]:
+def diversify_outbounds_by_protocol(protocol_outbounds: List[Dict[str, Any]], limit: int = 75) -> List[Dict[str, Any]]:
     groups = {}
     for ob in protocol_outbounds:
         src = ob.get("source", "unknown")
@@ -489,7 +460,7 @@ def diversify_outbounds_by_protocol(protocol_outbounds: List[Dict[str, Any]], li
     return diversified
 
 # ---------------------------
-# Filtering best outbounds: Limit to 50 best working per protocol.
+# Filtering best outbounds: Limit to 75 best working per protocol.
 # ---------------------------
 def filter_best_outbounds_by_protocol(outbounds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     protocols = {}
@@ -502,10 +473,10 @@ def filter_best_outbounds_by_protocol(outbounds: List[Dict[str, Any]]) -> List[D
             ob for ob in obs
             if ob.get("tcp_delay", 0) != float('inf') and ob.get("http_delay", 0) != float('inf')
         ]
-        if len(working) <= 50:
+        if len(working) <= 75:
             filtered.extend(working)
         else:
-            diversified = diversify_outbounds_by_protocol(working, limit=50)
+            diversified = diversify_outbounds_by_protocol(working, limit=75)
             filtered.extend(diversified)
     return filtered
 
@@ -776,11 +747,21 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
     print("Exiting single_test_pass")
 
 # ---------------------------
+# Preprocess outbounds for Hiddify
+# For Hiddify the local_address should remain a list. (No conversion required)
+# ---------------------------
+def preprocess_outbounds_for_hiddify(config: Dict[str, Any]) -> Dict[str, Any]:
+    # Do not convert list to string; Hiddify expects a list of prefixes.
+    return config
+
+# ---------------------------
 # Saving configuration (Thread-safe)
 # Saves config in Base64 encoded format by default unless --no-base64 is specified.
 # ---------------------------
 def save_config(config: Dict[str, Any], filepath: str = "merge_config.json", base64_encode: bool = True):
     try:
+        # Preprocess specific outbounds for Hiddify (keeps local_address as list)
+        config = preprocess_outbounds_for_hiddify(config)
         for outbound in config.get("outbounds", []):
             outbound.pop("udp_delay", None)
             outbound.pop("tcp_delay", None)
@@ -800,14 +781,13 @@ def save_config(config: Dict[str, Any], filepath: str = "merge_config.json", bas
         print(f"Error saving config to {filepath}: {e}")
 
 # ---------------------------
-# Renaming outbound tags according to protocol with counter (max 50)
+# Renaming outbound tags according to protocol with counter (max 75)
 # ---------------------------
 def rename_outbound_tags(config: Dict[str, Any]) -> Dict[str, Any]:
     protocol_abbr = {
         "shadowsocks": "SS",
         "vless": "VL",
         "vmess": "VM",
-        "trojan": "TJ",
         "tuic": "TU",
         "wireguard": "WG",
         "warp": "WG",
@@ -827,7 +807,7 @@ def rename_outbound_tags(config: Dict[str, Any]) -> Dict[str, Any]:
             protocol_groups.setdefault(typ, []).append(ob)
     for typ, group in protocol_groups.items():
         abbr = protocol_abbr.get(typ, "XX")
-        limited = group[:50]  # ensure maximum 50 outbounds per protocol
+        limited = group[:75]  # ensure maximum 75 outbounds per protocol
         for i, ob in enumerate(limited, start=1):
             new_tag = f"🔒Pr0xySh4rk🦈{abbr}{i:02d}"
             tag_mapping[ob["tag"]] = new_tag
@@ -882,7 +862,7 @@ def main():
     parser.add_argument("--test-proxy", help="Optional proxy to use for HTTP testing outbounds (e.g., 'http://127.0.0.1:1080')")
     parser.add_argument("-r", "--repetitions", type=int, default=5, help="Number of test repetitions (HTTP) per outbound (default: 5)")
     parser.add_argument("--test", choices=["tcp", "udp", "http", "tcp+http"], default="http",
-                        help="Specify which test(s) to run. 'tcp+http' runs a two-pass test (TCP then HTTP).")
+                        help="Specify which test(s) to run. 'tcp+http' runs a two-pass test (TCP then HTTP) for all outbounds except WireGuard/Warp/Hysteria which are UDP tested.")
     parser.add_argument("--no-base64", action="store_false", dest="base64_encode",
                         help="Output final config in plain text instead of Base64")
     parser.set_defaults(base64_encode=True)
@@ -1045,29 +1025,43 @@ def main():
     all_parsed_outbounds = deduplicate_outbounds(all_parsed_outbounds)
     print(f"Total unique outbounds after deduplication: {len(all_parsed_outbounds)}")
 
-    # If test mode is tcp+http, perform a two-pass test:
+    # Test phase:
     if args.test == "tcp+http":
-        print("\n=== First pass: TCP test ===")
-        single_test_pass(all_parsed_outbounds, "tcp", args.threads, args.test_proxy, args.repetitions)
-        survivors_tcp = [ob for ob in all_parsed_outbounds if ob.get("tcp_delay", float('inf')) != float('inf')]
-        print(f"{len(survivors_tcp)} outbounds passed the TCP test. Proceeding to HTTP test...")
+        # Partition outbounds: For WireGuard/Warp/Hysteria group use UDP testing only.
+        group_udp = [ob for ob in all_parsed_outbounds if ob.get("type") in ("wireguard", "warp", "hysteria", "hysteria2", "hy2")]
+        group_tcp_http = [ob for ob in all_parsed_outbounds if ob.get("type") not in ("wireguard", "warp", "hysteria", "hysteria2", "hy2")]
+
+        # Test non-WG/Warp/Hysteria outbounds with TCP then HTTP:
+        print("\n=== Testing non-WireGuard/Warp/Hysteria (TCP+HTTP) outbounds ===")
+        single_test_pass(group_tcp_http, "tcp", args.threads, args.test_proxy, args.repetitions)
+        survivors_tcp = [ob for ob in group_tcp_http if ob.get("tcp_delay", float('inf')) != float('inf')]
+        print(f"{len(survivors_tcp)} outbounds passed the TCP test (non-WG/Warp/Hysteria).")
 
         if is_ctrl_c_pressed:
-            print("Exiting early due to Ctrl+C after first pass.")
+            print("Exiting early due to Ctrl+C after TCP testing.")
             save_config(base_config_template, filepath=args.output, base64_encode=args.base64_encode)
             sys.exit(0)
 
-        print("\n=== Second pass: HTTP test ===")
+        print("\n=== Running HTTP test for non-WireGuard/Warp/Hysteria outbounds ===")
         single_test_pass(survivors_tcp, "http", args.threads, args.test_proxy, args.repetitions)
         survivors_http = [ob for ob in survivors_tcp if ob.get("http_delay", float('inf')) != float('inf')]
-        print(f"{len(survivors_http)} outbounds passed both TCP and HTTP tests.")
+        print(f"{len(survivors_http)} outbounds passed both TCP and HTTP tests (non-WG/Warp/Hysteria).")
+
+        # Now for WG/Warp/Hysteria group: UDP test only.
+        print("\n=== Testing WireGuard/Warp/Hysteria (UDP) outbounds ===")
+        single_test_pass(group_udp, "udp", args.threads, args.test_proxy, args.repetitions)
+        survivors_udp = [ob for ob in group_udp if ob.get("udp_delay", float('inf')) != float('inf')]
+        print(f"{len(survivors_udp)} outbounds passed the UDP test for WG/Warp/Hysteria.")
+
+        all_parsed_outbounds = survivors_http + survivors_udp
+        print(f"Total outbounds passed all tests: {len(all_parsed_outbounds)}")
 
         if is_ctrl_c_pressed:
-            print("Exiting early due to Ctrl+C after second pass.")
+            print("Exiting early due to Ctrl+C after testing.")
             save_config(base_config_template, filepath=args.output, base64_encode=args.base64_encode)
             sys.exit(0)
 
-        all_parsed_outbounds = filter_best_outbounds_by_protocol(survivors_http)
+        all_parsed_outbounds = filter_best_outbounds_by_protocol(all_parsed_outbounds)
         print(f"Total outbounds after filtering best per protocol: {len(all_parsed_outbounds)}")
 
     else:
@@ -1087,7 +1081,7 @@ def main():
         all_parsed_outbounds = filter_best_outbounds_by_protocol(all_parsed_outbounds)
         print(f"Total outbounds after filtering best per protocol: {len(all_parsed_outbounds)}")
 
-    # Use a deep copy of the base config template to avoid unintended modifications
+    # Merge and rename outbounds
     merged_config = replace_existing_outbounds(copy.deepcopy(base_config_template), all_parsed_outbounds)
     merged_config = rename_outbound_tags(merged_config)
     save_config(merged_config, filepath=args.output, base64_encode=args.base64_encode)
