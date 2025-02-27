@@ -12,7 +12,7 @@ import sys
 from typing import List, Dict, Optional, Any
 
 # --- Configuration ---
-TEST_URLS = ["https://www.pinginf.net/", "https://speedtest.ir"]
+TEST_URLS = ["https://www.pinging.net/", "https://speedtest.ir"]
 total_outbounds_count = 0
 completed_outbounds_count = 0
 is_ctrl_c_pressed = False
