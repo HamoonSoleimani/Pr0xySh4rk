@@ -16,9 +16,14 @@
 - **Output:**  
   - The final merged configuration is output in Base64 by default.
  
-## Usage
-Simply copy this subscription link and paste it on Hiddify Application
-```bash
-https://raw.githubusercontent.com/HamoonSoleimani/Pr0xySh4rk/refs/heads/main/Pr0xySh4rk.txt
+
+### For Hiddify
+
+`https://raw.githubusercontent.com/HamoonSoleimani/Pr0xySh4rk/refs/heads/main/Pr0xySh4rk.txt`
+
+### For v2ray-ng (Xray core)
+
+`https://raw.githubusercontent.com/HamoonSoleimani/Pr0xySh4rk/refs/heads/main/Pr0xySh4rkBase64.txt`
+
 
 
