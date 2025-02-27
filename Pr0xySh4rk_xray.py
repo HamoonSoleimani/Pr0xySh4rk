@@ -9,6 +9,7 @@ import requests
 import os
 import signal
 import sys
+import json
 from typing import List, Dict, Optional, Any
 
 # --- Configuration ---
@@ -68,10 +69,54 @@ def parse_config_content(content: str) -> List[str]:
     return outbounds
 
 # ---------------------------
-# Deduplicate outbounds
+# Get deduplication key from config based on addresses/properties
+# ---------------------------
+def get_dedup_key(config: str) -> tuple:
+    scheme_sep = "://"
+    if scheme_sep not in config:
+        return (config,)
+    scheme = config.split(scheme_sep, 1)[0].lower()
+    remainder = config.split(scheme_sep, 1)[1]
+    if scheme == "vmess":
+        try:
+            # For vmess, decode the base64 part to extract JSON properties
+            decoded = base64.b64decode(remainder).decode("utf-8")
+            data = json.loads(decoded)
+            address = data.get("add")
+            port = data.get("port")
+            return (scheme, address, port)
+        except Exception as e:
+            pass  # Fallback to urlparse if decoding fails
+    if scheme == "ss":
+        # For ss, try to extract address and port after '@'
+        if "@" in remainder:
+            try:
+                creds, rest = remainder.split("@", 1)
+                if ":" in rest:
+                    host_part = rest.split(":", 1)
+                    address = host_part[0]
+                    port_str = host_part[1].split("#")[0]
+                    try:
+                        port = int(port_str)
+                    except:
+                        port = None
+                    return (scheme, address, port)
+            except Exception:
+                pass
+    # For other protocols, use urlparse
+    parsed = urllib.parse.urlparse(config)
+    return (parsed.scheme.lower(), parsed.hostname, parsed.port)
+
+# ---------------------------
+# Deduplicate outbounds based on deduplication key (address/properties)
 # ---------------------------
 def deduplicate_outbounds(outbounds: List[str]) -> List[str]:
-    return list(dict.fromkeys(outbounds))
+    dedup_dict = {}
+    for config in outbounds:
+        key = get_dedup_key(config)
+        if key not in dedup_dict:
+            dedup_dict[key] = config
+    return list(dedup_dict.values())
 
 # ---------------------------
 # Diversify and limit (used in testing phases if needed) - Not used for final filtering anymore
@@ -91,7 +136,7 @@ def diversify_outbounds_by_protocol(protocol_outbounds: List[Dict[str, Any]], li
         def combined_delay(o: Dict[str, Any]) -> float:
             td = o.get("tcp_delay", float('inf'))
             hd = o.get("http_delay", float('inf'))
-            return (td + hd) if td != float('inf') and hd != float('inf') else float('inf') # Calculate combined delay properly
+            return (td + hd) if td != float('inf') and hd != float('inf') else float('inf')
         groups[src].sort(key=combined_delay)
     diversified = []
     while len(diversified) < limit:
@@ -209,7 +254,6 @@ async def udp_test_outbound(ob: Dict[str, Any]) -> None:
     parsed_url = urllib.parse.urlparse(config_line)
     server, port = parsed_url.hostname, parsed_url.port
 
-    # If server/port are missing, but it *is* a warp/wireguard, include it with inf delay.
     if (not server or not port) and config_line.startswith(("warp://", "wireguard://")):
         ob["udp_delay"] = float('inf')
         print(f"UDP Test: No server/port, BUT IS WG/WARP, delay=inf - Config: {config_line}")
@@ -252,12 +296,12 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
     global completed_outbounds_count, total_outbounds_count, is_ctrl_c_pressed
     completed_outbounds_count = 0
     total_outbounds_count = len(outbounds)
-    processed_outbound_indices = set() # To track processed outbounds for progress
+    processed_outbound_indices = set()
 
     print(f"Starting tests ({test_type}) on {total_outbounds_count} outbounds")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=thread_pool_size) as executor:
-        futures_map = {} # Map outbound index to list of futures for each outbound
+        futures_map = {}
         for index, ob in enumerate(outbounds):
             if is_ctrl_c_pressed:
                 print("Ctrl+C detected, stopping tests.")
@@ -285,14 +329,14 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
                     future = executor.submit(udp_test_outbound_sync, ob)
                     futures_list.append(future)
                 else:
-                    ob["udp_delay"] = float('inf') # Set udp delay to infinity for non-wg/warp protocols if only udp test is requested for all
-                    continue # skip other tests
-            else:  # Default to HTTP
+                    ob["udp_delay"] = float('inf')
+                    continue
+            else:
                 future = executor.submit(http_delay_test_outbound_sync, ob, proxy_for_test, repetitions)
                 futures_list.append(future)
-            futures_map[index] = futures_list # Store futures list for this outbound index
+            futures_map[index] = futures_list
 
-        all_futures = [future for futures_list in futures_map.values() for future in futures_list] # Flatten futures for as_completed
+        all_futures = [future for futures_list in futures_map.values() for future in futures_list]
 
         for future in concurrent.futures.as_completed(all_futures):
             if is_ctrl_c_pressed:
@@ -302,20 +346,15 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
             except Exception as e:
                 print(f"Exception during test: {e}")
             finally:
-                # Determine which outbound this future belongs to and update progress if all futures for that outbound are complete
                 for index, futures_list in futures_map.items():
                     if future in futures_list and index not in processed_outbound_indices:
-                        all_done = True
-                        for f in futures_list:
-                            if not f.done():
-                                all_done = False
-                                break
+                        all_done = all(f.done() for f in futures_list)
                         if all_done:
                             completed_outbounds_count += 1
                             processed_outbound_indices.add(index)
                             progress_percentage = (completed_outbounds_count / total_outbounds_count) * 100
                             print(f"Progress: {progress_percentage:.2f}% ({completed_outbounds_count}/{total_outbounds_count})")
-                            break # Important: Only increment and print once per outbound
+                            break
 
     print("Testing completed.")
 
@@ -339,11 +378,10 @@ def save_config(outbounds: List[str], filepath: str = "merged_configs.txt", base
         print(f"Error saving config: {e}")
 
 # ---------------------------
-# New Helper: Rename configs by replacing the remark (after '#') with a Pr0xySh4rk-formatted tag.
-# Only the portion after the '#' is replaced. If no '#' exists, the tag is appended.
+# Rename configs by replacing the remark (after '#') with a Pr0xySh4rk-formatted tag.
 # Group by protocol and limit each group to best BEST_CONFIGS_LIMIT.
 # ---------------------------
-def rename_configs_by_protocol(configs: List[Dict[str, Any]]) -> List[str]: # Modified to accept list of dicts
+def rename_configs_by_protocol(configs: List[Dict[str, Any]]) -> List[str]:
     protocol_map = {
         "ss": "SS",
         "vless": "VL",
@@ -356,17 +394,16 @@ def rename_configs_by_protocol(configs: List[Dict[str, Any]]) -> List[str]: # Mo
         "wireguard": "WG",
     }
     renamed_configs = []
-    protocol_groups_renamed = {} # To store renamed configs grouped by protocol
+    protocol_groups_renamed = {}
 
-    protocol_groups = {} # Group configs by protocol for renaming
-    for config_dict in configs: # Iterate over dicts
+    protocol_groups = {}
+    for config_dict in configs:
         config = config_dict["original_config"]
         proto = config.split("://")[0].lower()
         abbr = protocol_map.get(proto, proto.upper())
-        protocol_groups.setdefault(abbr, []).append(config_dict) # Append dict to groups
+        protocol_groups.setdefault(abbr, []).append(config_dict)
 
     for abbr, conf_list in protocol_groups.items():
-        # Sort within each protocol group by combined delay if available, otherwise by any delay.
         if 'combined_delay' in conf_list[0]:
             conf_list.sort(key=lambda x: x.get('combined_delay', float('inf')))
         elif 'http_delay' in conf_list[0]:
@@ -376,10 +413,13 @@ def rename_configs_by_protocol(configs: List[Dict[str, Any]]) -> List[str]: # Mo
         elif 'udp_delay' in conf_list[0]:
             conf_list.sort(key=lambda x: x.get('udp_delay', float('inf')))
 
-        limited_list = [item for item in conf_list if item.get('combined_delay', float('inf')) != float('inf') or item.get('http_delay', float('inf')) != float('inf') or item.get('tcp_delay', float('inf')) != float('inf') or item.get('udp_delay', float('inf')) != float('inf')][:BEST_CONFIGS_LIMIT] # Filter out inf delays and limit to BEST_CONFIGS_LIMIT
+        limited_list = [item for item in conf_list if item.get('combined_delay', float('inf')) != float('inf') or 
+                        item.get('http_delay', float('inf')) != float('inf') or 
+                        item.get('tcp_delay', float('inf')) != float('inf') or 
+                        item.get('udp_delay', float('inf')) != float('inf')][:BEST_CONFIGS_LIMIT]
 
         renamed_protocol_configs = []
-        for i, config_dict in enumerate(limited_list, start=1): # Iterate over dicts in limited list
+        for i, config_dict in enumerate(limited_list, start=1):
             config = config_dict["original_config"]
             new_tag = f"🔒Pr0xySh4rk🦈{abbr}{i:02d}"
             if "#" in config:
@@ -388,8 +428,8 @@ def rename_configs_by_protocol(configs: List[Dict[str, Any]]) -> List[str]: # Mo
             else:
                 new_config = f"{config}#{new_tag}"
             renamed_protocol_configs.append(new_config)
-        protocol_groups_renamed[abbr] = renamed_protocol_configs # Store renamed configs per protocol
-        renamed_configs.extend(renamed_protocol_configs) # Accumulate all renamed configs
+        protocol_groups_renamed[abbr] = renamed_protocol_configs
+        renamed_configs.extend(renamed_protocol_configs)
 
     return renamed_configs
 
@@ -487,13 +527,11 @@ def main():
     } for config in deduplicated_outbounds]
 
     if args.test == "tcp+http":
-        # Separate WG/WARP and non-WG/WARP configs
         wireguard_warp_configs = [ob for ob in deduplicated_outbounds_dicts if ob["original_config"].startswith(("warp://", "wireguard://"))]
         other_configs = [ob for ob in deduplicated_outbounds_dicts if not ob["original_config"].startswith(("warp://", "wireguard://"))]
 
-        # Combine for unified testing and progress
         combined_outbounds_for_test = other_configs + wireguard_warp_configs
-        total_outbounds_count = len(combined_outbounds_for_test) # Set total count for progress
+        total_outbounds_count = len(combined_outbounds_for_test)
 
         print("\n=== Testing all configs (TCP+HTTP for others, UDP for WG/WARP) ===")
         single_test_pass(combined_outbounds_for_test, "tcp+http", args.threads, args.test_proxy, args.repetitions)
@@ -503,19 +541,15 @@ def main():
         survivors_udp = [ob for ob in wireguard_warp_configs if ob.get("udp_delay", float('inf')) != float('inf')]
         print(f"{len(survivors_udp)} WG/WARP passed UDP.")
 
-        # Combine survivors - No need to diversify or limit here, rename_configs_by_protocol will handle it per protocol
         tested_outbounds = survivors_tcp_http + survivors_udp
 
-        # Calculate combined delay for sorting for non-wg/warp configs
         for ob in survivors_tcp_http:
-            ob["combined_delay"] = (ob.get("tcp_delay", float('inf')) + ob.get("http_delay", float('inf')) ) / 2 if ob.get("tcp_delay", float('inf')) != float('inf') and ob.get("http_delay", float('inf')) != float('inf') else float('inf')
-        # For wg/warp, just use udp delay as combined delay
+            ob["combined_delay"] = (ob.get("tcp_delay", float('inf')) + ob.get("http_delay", float('inf'))) / 2 if ob.get("tcp_delay", float('inf')) != float('inf') and ob.get("http_delay", float('inf')) != float('inf') else float('inf')
         for ob in survivors_udp:
             ob["combined_delay"] = ob.get("udp_delay", float('inf'))
 
-
-    else:  # For single test types (tcp, udp, http)
-        total_outbounds_count = len(deduplicated_outbounds_dicts) # Set total count for progress
+    else:
+        total_outbounds_count = len(deduplicated_outbounds_dicts)
         single_test_pass(deduplicated_outbounds_dicts, args.test, args.threads, args.test_proxy, args.repetitions)
         if is_ctrl_c_pressed:
             print("Exiting after testing due to Ctrl+C.")
@@ -525,24 +559,20 @@ def main():
             tested_outbounds = [ob for ob in deduplicated_outbounds_dicts if ob.get("tcp_delay", float('inf')) != float('inf')]
         elif args.test == "udp":
             tested_outbounds = [ob for ob in deduplicated_outbounds_dicts if ob.get("udp_delay", float('inf')) != float('inf')]
-        else:  # "http"
+        else:
             tested_outbounds = [ob for ob in deduplicated_outbounds_dicts if ob.get("http_delay", float('inf')) != float('inf')]
         print(f"{len(tested_outbounds)} passed {args.test}.")
 
-        # No need to diversify or limit here, rename_configs_by_protocol will handle it per protocol
-        tested_outbounds_copy = tested_outbounds[:] # Create a copy to avoid modifying original list during iteration
+        tested_outbounds_copy = tested_outbounds[:]
         for ob in tested_outbounds_copy:
             if args.test == "tcp":
                 ob["combined_delay"] = ob.get("tcp_delay", float('inf'))
             elif args.test == 'udp':
                 ob["combined_delay"] = ob.get("udp_delay", float('inf'))
-            else:  # "http"
+            else:
                 ob["combined_delay"] = ob.get("http_delay", float('inf'))
 
-
-    # Rename configs by replacing the remark (after '#') with a Pr0xySh4rk-formatted tag,
-    # grouping by protocol and limiting each group to best BEST_CONFIGS_LIMIT.
-    renamed_final_outbounds = rename_configs_by_protocol(tested_outbounds) # Pass the tested_outbounds which are list of dicts
+    renamed_final_outbounds = rename_configs_by_protocol(tested_outbounds)
     print("Renaming completed. Total renamed configs:", len(renamed_final_outbounds))
 
     save_config(renamed_final_outbounds, filepath=args.output, base64_encode=not args.no_base64)
