@@ -16,12 +16,8 @@
 - **Output:**  
   - The final merged configuration is output in Base64 by default.
  
-
-### For Hiddify
-
-`https://raw.githubusercontent.com/HamoonSoleimani/Pr0xySh4rk/refs/heads/main/Pr0xySh4rk.txt`
-
-### For v2ray-ng (Xray core)
+### Usage
+Simply import this url into your Hiddify/V2ray client applications!
 
 `https://raw.githubusercontent.com/HamoonSoleimani/Pr0xySh4rk/refs/heads/main/Pr0xySh4rkBase64.txt`
 
