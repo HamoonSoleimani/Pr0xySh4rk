@@ -13,7 +13,7 @@ import json
 from typing import List, Dict, Optional, Any
 
 # --- Configuration ---
-TEST_URLS = ["https://www.pinging.net/", "https://speedtest.ir"]
+TEST_URLS = ["https://www.pinging.net/", "https://speedtest.ir","http://cp.cloudflare.com/"]
 BEST_CONFIGS_LIMIT = 70  # Changed to 70 as per user request
 total_outbounds_count = 0
 completed_outbounds_count = 0
