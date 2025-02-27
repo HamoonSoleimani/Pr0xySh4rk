@@ -339,7 +339,7 @@ def rename_configs_by_protocol(configs: List[str]) -> List[str]:
         proto = config.split("://")[0].lower()
         abbr = protocol_map.get(proto, proto.upper())
         groups.setdefault(abbr, []).append(config)
-    
+
     renamed_configs = []
     for abbr, conf_list in groups.items():
         limited_list = conf_list[:75]
@@ -458,7 +458,7 @@ def main():
         print(f"{len(survivors_tcp_http)} non-WG/WARP passed TCP and HTTP.")
 
         print("\n=== Testing WireGuard/WARP configs (UDP only) ===")
-        single_test_pass(wireguard_warp_configs, "udp", args.threads)
+        single_test_pass(wireguard_warp_configs, "tcp+http", args.threads) # Using "tcp+http" test_type here, but it will only do UDP for WG/WARP
         survivors_udp = [ob for ob in wireguard_warp_configs if ob.get("udp_delay", float('inf')) != float('inf')]
         print(f"{len(survivors_udp)} WG/WARP passed (or skipped with inf delay) UDP.")
 
