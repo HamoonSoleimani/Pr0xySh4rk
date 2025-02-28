@@ -12,36 +12,15 @@ import sys
 import json
 import logging
 import re
-import atexit
-from collections import deque
 from typing import List, Dict, Optional, Any
-
-# Custom logging handler to only keep the last 30 lines in the log file.
-class LastNLinesFileHandler(logging.Handler):
-    def __init__(self, filename: str, max_lines: int = 30):
-        super().__init__()
-        self.filename = filename
-        self.max_lines = max_lines
-        self.buffer = deque(maxlen=max_lines)
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            msg = self.format(record)
-            self.buffer.append(msg)
-        except Exception:
-            self.handleError(record)
-
-    def flush(self) -> None:
-        try:
-            with open(self.filename, "w") as f:
-                for line in self.buffer:
-                    f.write(line + "\n")
-        except Exception as e:
-            sys.stderr.write(f"Error writing log file: {e}\n")
 
 # --- Configuration ---
 # Test against these two websites: one HTTPS and one HTTP.
-TEST_URLS = ["https://www.pornhub.com", "http://cp.cloudflare.com/"]
+TEST_URLS = [
+    "http://cp.cloudflare.com/",
+    "http://neverssl.com",
+    "http://stu.iust.ac.ir/index.rose"
+]
 # Gather the best 75 working configs for each protocol.
 BEST_CONFIGS_LIMIT = 75
 total_outbounds_count = 0
@@ -503,13 +482,12 @@ def main():
     ch.setLevel(logging.INFO)
     ch.setFormatter(formatter)
     logger.addHandler(ch)
-    # File handler (if provided) - only the last 30 lines will be written
+    # File handler (if provided)
     if args.log:
-        fh = LastNLinesFileHandler(args.log, max_lines=30)
+        fh = logging.FileHandler(args.log, mode="w")
         fh.setLevel(logging.INFO)
         fh.setFormatter(formatter)
         logger.addHandler(fh)
-        atexit.register(fh.flush)
 
     original_env = {}
     proxy_vars = ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'PROXY', 'ALL_PROXY']
@@ -580,8 +558,7 @@ def main():
         tested_outbounds = survivors_tcp_http + survivors_udp
 
         for ob in survivors_tcp_http:
-            ob["combined_delay"] = (ob.get("tcp_delay", float('inf')) + ob.get("http_delay", float('inf'))) / 2 \
-                if ob.get("tcp_delay", float('inf')) != float('inf') and ob.get("http_delay", float('inf')) != float('inf') else float('inf')
+            ob["combined_delay"] = (ob.get("tcp_delay", float('inf')) + ob.get("http_delay", float('inf'))) / 2 if ob.get("tcp_delay", float('inf')) != float('inf') and ob.get("http_delay", float('inf')) != float('inf') else float('inf')
         for ob in survivors_udp:
             ob["combined_delay"] = ob.get("udp_delay", float('inf'))
 
