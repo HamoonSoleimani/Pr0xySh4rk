@@ -106,8 +106,20 @@ def get_dedup_key(config: str) -> tuple:
             except Exception:
                 pass
     # For other protocols, use urlparse
-    parsed = urllib.parse.urlparse(config)
-    return (parsed.scheme.lower(), parsed.hostname, parsed.port)
+    try:
+        parsed = urllib.parse.urlparse(config)
+        # Check if port can be converted to integer before returning
+        port = None
+        if parsed.port is not None:
+            try:
+                port = int(parsed.port)
+            except (ValueError, TypeError):
+                # If port is not a valid integer, use None
+                pass
+        return (parsed.scheme.lower(), parsed.hostname, port)
+    except Exception as e:
+        print(f"Error parsing URL {config}: {e}")
+        return (scheme, None, None)
 
 # ---------------------------
 # Deduplicate outbounds based on deduplication key (address/properties)
@@ -131,8 +143,13 @@ def tcp_test_outbound_sync(ob: Dict[str, Any]) -> None:
 
 async def tcp_test_outbound(ob: Dict[str, Any]) -> None:
     config_line = ob.get("original_config")
-    parsed_url = urllib.parse.urlparse(config_line)
-    server, port = parsed_url.hostname, parsed_url.port
+    try:
+        parsed_url = urllib.parse.urlparse(config_line)
+        server, port = parsed_url.hostname, parsed_url.port
+    except Exception as e:
+        print(f"TCP Test: Error parsing URL {config_line}: {e}")
+        ob["tcp_delay"] = float('inf')
+        return
 
     if not server or not port:
         ob["tcp_delay"] = float('inf')
@@ -165,8 +182,13 @@ def http_delay_test_outbound_sync(ob: Dict[str, Any], proxy: Optional[str], repe
 
 async def http_delay_test_outbound(ob: Dict[str, Any], proxy_for_test: Optional[str], repetitions: int) -> None:
     config_line = ob.get("original_config")
-    parsed_url = urllib.parse.urlparse(config_line)
-    server, port = parsed_url.hostname, parsed_url.port
+    try:
+        parsed_url = urllib.parse.urlparse(config_line)
+        server, port = parsed_url.hostname, parsed_url.port
+    except Exception as e:
+        print(f"HTTP Test: Error parsing URL {config_line}: {e}")
+        ob["http_delay"] = float('inf')
+        return
 
     if not server or not port:
         ob["http_delay"] = float('inf')
@@ -221,8 +243,13 @@ def udp_test_outbound_sync(ob: Dict[str, Any]) -> None:
 
 async def udp_test_outbound(ob: Dict[str, Any]) -> None:
     config_line = ob.get("original_config")
-    parsed_url = urllib.parse.urlparse(config_line)
-    server, port = parsed_url.hostname, parsed_url.port
+    try:
+        parsed_url = urllib.parse.urlparse(config_line)
+        server, port = parsed_url.hostname, parsed_url.port
+    except Exception as e:
+        print(f"UDP Test: Error parsing URL {config_line}: {e}")
+        ob["udp_delay"] = float('inf')
+        return
 
     if (not server or not port) and config_line.startswith(("warp://", "wireguard://")):
         ob["udp_delay"] = float('inf')
@@ -277,7 +304,12 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
                 print("Ctrl+C detected, stopping tests.")
                 break
             config_line = ob.get("original_config")
-            protocol = config_line.split("://")[0]
+            try:
+                protocol = config_line.split("://")[0]
+            except Exception as e:
+                print(f"Error parsing protocol from {config_line}: {e}")
+                continue
+                
             futures_list = []
 
             if test_type == "tcp+http":
@@ -367,9 +399,13 @@ def rename_configs_by_protocol(configs: List[Dict[str, Any]]) -> List[str]:
     protocol_groups = {}
     for config_dict in configs:
         config = config_dict["original_config"]
-        proto = config.split("://")[0].lower()
-        abbr = protocol_map.get(proto, proto.upper())
-        protocol_groups.setdefault(abbr, []).append(config_dict)
+        try:
+            proto = config.split("://")[0].lower()
+            abbr = protocol_map.get(proto, proto.upper())
+            protocol_groups.setdefault(abbr, []).append(config_dict)
+        except Exception as e:
+            print(f"Error processing config {config}: {e}")
+            continue
 
     for abbr, conf_list in protocol_groups.items():
         valid_list = [item for item in conf_list if item.get('combined_delay', float('inf')) != float('inf')]
@@ -401,10 +437,14 @@ def fetch_and_parse_subscription_thread(url: str, proxy: Optional[str] = None) -
             pass
         outbounds_list = parse_config_content(content)
         if outbounds_list:
-            # Deduplicate within this subscription before returning
-            unique_configs = deduplicate_outbounds(outbounds_list)
-            print(f"Thread {os.getpid()}: Parsed {len(unique_configs)} unique outbounds from {url}")
-            return [{"original_config": ob, "source": url} for ob in unique_configs]
+            try:
+                # Deduplicate within this subscription before returning
+                unique_configs = deduplicate_outbounds(outbounds_list)
+                print(f"Thread {os.getpid()}: Parsed {len(unique_configs)} unique outbounds from {url}")
+                return [{"original_config": ob, "source": url} for ob in unique_configs]
+            except Exception as e:
+                print(f"Thread {os.getpid()}: Error deduplicating outbounds from {url}: {e}")
+                return []
         else:
             print(f"Thread {os.getpid()}: No outbounds parsed from {url}")
             return []
@@ -464,9 +504,12 @@ def main():
             if is_ctrl_c_pressed:
                 print("Ctrl+C during fetching.")
                 break
-            result = future.result()
-            if result:
-                parsed_outbounds_lists.extend(result)
+            try:
+                result = future.result()
+                if result:
+                    parsed_outbounds_lists.extend(result)
+            except Exception as e:
+                print(f"Error processing subscription: {e}")
         if is_ctrl_c_pressed:
             print("Exiting early due to Ctrl+C.")
             sys.exit(0)
@@ -475,9 +518,12 @@ def main():
     print(f"Total parsed: {len(parsed_outbounds_lists)}")
     unique_outbounds_dict = {}
     for outbound in parsed_outbounds_lists:
-        key = get_dedup_key(outbound["original_config"])
-        if key not in unique_outbounds_dict:
-            unique_outbounds_dict[key] = outbound
+        try:
+            key = get_dedup_key(outbound["original_config"])
+            if key not in unique_outbounds_dict:
+                unique_outbounds_dict[key] = outbound
+        except Exception as e:
+            print(f"Error deduplicating outbound {outbound}: {e}")
     unique_outbounds = list(unique_outbounds_dict.values())
     print(f"Unique deduplicated configs: {len(unique_outbounds)}")
 
