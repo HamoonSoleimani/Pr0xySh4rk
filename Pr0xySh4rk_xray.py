@@ -14,7 +14,7 @@ from typing import List, Dict, Optional, Any
 
 # --- Configuration ---
 # Test against these websites (HTTP/HTTPS)
-TEST_URLS = ["http://httpbin.org/get", "http://cp.cloudflare.com/", "http://neverssl.com", "http://stu.iust.ac.ir/index.rose"]
+TEST_URLS = [ "http://cp.cloudflare.com/", "http://neverssl.com"]
 # Gather the best 75 working configs for each protocol.
 BEST_CONFIGS_LIMIT = 75
 total_outbounds_count = 0
