@@ -20,6 +20,7 @@ requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 # --- Configuration ---
 # Test against these websites (HTTP/HTTPS)
 TEST_URLS = [
+    "http://httpbin.org/get",
     "https://www.cloudflare.com/",
     "http://neverssl.com",
     "http://stu.iust.ac.ir/index.rose"
