@@ -13,8 +13,8 @@ import json
 from typing import List, Dict, Optional, Any
 
 # --- Configuration ---
-# Test against these two websites: one HTTPS and one HTTP.
-TEST_URLS = ["http://httpbin.org/get", "http://cp.cloudflare.com/","https://api.ipify.org/?format=json"]
+# Test against these websites (HTTP/HTTPS)
+TEST_URLS = ["http://httpbin.org/get", "http://cp.cloudflare.com/", "http://neverssl.com", "http://stu.iust.ac.ir/index.rose"]
 # Gather the best 75 working configs for each protocol.
 BEST_CONFIGS_LIMIT = 75
 total_outbounds_count = 0
@@ -155,7 +155,7 @@ async def tcp_test_outbound(ob: Dict[str, Any]) -> None:
         print(f"TCP Test for {config_line} error: {e}, delay=inf")
 
 # ---------------------------
-# HTTP test (complete and precise for both HTTPS and HTTP URLs)
+# HTTP test (for both HTTP and HTTPS URLs)
 # ---------------------------
 def http_delay_test_outbound_sync(ob: Dict[str, Any], proxy: Optional[str], repetitions: int) -> None:
     try:
@@ -178,7 +178,6 @@ async def http_delay_test_outbound(ob: Dict[str, Any], proxy_for_test: Optional[
 
     print(f"HTTP Test for {config_line} started with {repetitions} repetitions for each test URL...")
 
-    # Test each website defined in TEST_URLS
     for test_url in TEST_URLS:
         times = []
         print(f"  Testing against: {test_url}")
@@ -194,7 +193,6 @@ async def http_delay_test_outbound(ob: Dict[str, Any], proxy_for_test: Optional[
             except requests.exceptions.RequestException as e:
                 times.append(None)
                 print(f"    [{config_line}] {test_url} Repetition {i+1} failed: {e}")
-        # Determine average delay for this website
         successful_times = [t for t in times if t is not None]
         if successful_times:
             avg = sum(successful_times) / len(successful_times)
@@ -204,7 +202,6 @@ async def http_delay_test_outbound(ob: Dict[str, Any], proxy_for_test: Optional[
             website_averages.append(float('inf'))
             print(f"  All trials failed for {test_url}, marking as inf delay")
 
-    # Both test URLs must pass (i.e. not be inf) for a successful config.
     if any(avg == float('inf') for avg in website_averages):
         ob["http_delay"] = float('inf')
         print(f"HTTP Test for {config_line} failed because one or more test URLs did not pass.")
@@ -321,8 +318,7 @@ def single_test_pass(outbounds: List[Dict[str, Any]],
             finally:
                 for index, futures_list in futures_map.items():
                     if future in futures_list and index not in processed_outbound_indices:
-                        all_done = all(f.done() for f in futures_list)
-                        if all_done:
+                        if all(f.done() for f in futures_list):
                             completed_outbounds_count += 1
                             processed_outbound_indices.add(index)
                             progress_percentage = (completed_outbounds_count / total_outbounds_count) * 100
@@ -375,9 +371,7 @@ def rename_configs_by_protocol(configs: List[Dict[str, Any]]) -> List[str]:
         abbr = protocol_map.get(proto, proto.upper())
         protocol_groups.setdefault(abbr, []).append(config_dict)
 
-    # Process each protocol group: sort by combined_delay, then keep best BEST_CONFIGS_LIMIT working outbounds.
     for abbr, conf_list in protocol_groups.items():
-        # Only consider working configs (i.e. combined_delay not infinity)
         valid_list = [item for item in conf_list if item.get('combined_delay', float('inf')) != float('inf')]
         valid_list.sort(key=lambda x: x.get('combined_delay', float('inf')))
         limited_list = valid_list[:BEST_CONFIGS_LIMIT]
@@ -407,8 +401,10 @@ def fetch_and_parse_subscription_thread(url: str, proxy: Optional[str] = None) -
             pass
         outbounds_list = parse_config_content(content)
         if outbounds_list:
-            print(f"Thread {os.getpid()}: Parsed {len(outbounds_list)} outbounds from {url}")
-            return [{"original_config": ob, "source": url} for ob in outbounds_list]
+            # Deduplicate within this subscription before returning
+            unique_configs = deduplicate_outbounds(outbounds_list)
+            print(f"Thread {os.getpid()}: Parsed {len(unique_configs)} unique outbounds from {url}")
+            return [{"original_config": ob, "source": url} for ob in unique_configs]
         else:
             print(f"Thread {os.getpid()}: No outbounds parsed from {url}")
             return []
@@ -475,19 +471,20 @@ def main():
             print("Exiting early due to Ctrl+C.")
             sys.exit(0)
 
-    all_parsed_outbounds = parsed_outbounds_lists
-    print(f"Total parsed: {len(all_parsed_outbounds)}")
+    # Merge all parsed outbounds and deduplicate before testing
+    print(f"Total parsed: {len(parsed_outbounds_lists)}")
+    unique_outbounds_dict = {}
+    for outbound in parsed_outbounds_lists:
+        key = get_dedup_key(outbound["original_config"])
+        if key not in unique_outbounds_dict:
+            unique_outbounds_dict[key] = outbound
+    unique_outbounds = list(unique_outbounds_dict.values())
+    print(f"Unique deduplicated configs: {len(unique_outbounds)}")
 
-    deduplicated_outbounds = deduplicate_outbounds([ob["original_config"] for ob in all_parsed_outbounds])
-    print(f"Unique: {len(deduplicated_outbounds)}")
-    deduplicated_outbounds_dicts = [{
-        "original_config": config,
-        "source": next((o["source"] for o in all_parsed_outbounds if o["original_config"] == config), "unknown")
-    } for config in deduplicated_outbounds]
-
+    # Begin testing unique configurations
     if args.test == "tcp+http":
-        wireguard_warp_configs = [ob for ob in deduplicated_outbounds_dicts if ob["original_config"].startswith(("warp://", "wireguard://"))]
-        other_configs = [ob for ob in deduplicated_outbounds_dicts if not ob["original_config"].startswith(("warp://", "wireguard://"))]
+        wireguard_warp_configs = [ob for ob in unique_outbounds if ob["original_config"].startswith(("warp://", "wireguard://"))]
+        other_configs = [ob for ob in unique_outbounds if not ob["original_config"].startswith(("warp://", "wireguard://"))]
 
         combined_outbounds_for_test = other_configs + wireguard_warp_configs
         total_outbounds_count = len(combined_outbounds_for_test)
@@ -509,18 +506,18 @@ def main():
             ob["combined_delay"] = ob.get("udp_delay", float('inf'))
 
     else:
-        total_outbounds_count = len(deduplicated_outbounds_dicts)
-        single_test_pass(deduplicated_outbounds_dicts, args.test, args.threads, args.test_proxy, args.repetitions)
+        total_outbounds_count = len(unique_outbounds)
+        single_test_pass(unique_outbounds, args.test, args.threads, args.test_proxy, args.repetitions)
         if is_ctrl_c_pressed:
             print("Exiting after testing due to Ctrl+C.")
             sys.exit(0)
 
         if args.test == "tcp":
-            tested_outbounds = [ob for ob in deduplicated_outbounds_dicts if ob.get("tcp_delay", float('inf')) != float('inf')]
+            tested_outbounds = [ob for ob in unique_outbounds if ob.get("tcp_delay", float('inf')) != float('inf')]
         elif args.test == "udp":
-            tested_outbounds = [ob for ob in deduplicated_outbounds_dicts if ob.get("udp_delay", float('inf')) != float('inf')]
+            tested_outbounds = [ob for ob in unique_outbounds if ob.get("udp_delay", float('inf')) != float('inf')]
         else:  # http test
-            tested_outbounds = [ob for ob in deduplicated_outbounds_dicts if ob.get("http_delay", float('inf')) != float('inf')]
+            tested_outbounds = [ob for ob in unique_outbounds if ob.get("http_delay", float('inf')) != float('inf')]
         print(f"{len(tested_outbounds)} passed {args.test} test.")
 
         for ob in tested_outbounds:
@@ -531,7 +528,6 @@ def main():
             else:
                 ob["combined_delay"] = ob.get("http_delay", float('inf'))
 
-    # For each protocol, we select the top {BEST_CONFIGS_LIMIT} working (lowest delay) configs.
     renamed_final_outbounds = rename_configs_by_protocol(tested_outbounds)
     print("Renaming and limiting completed. Total renamed configs:", len(renamed_final_outbounds))
 
