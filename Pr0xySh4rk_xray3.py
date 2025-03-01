@@ -591,7 +591,7 @@ def fetch_and_parse_subscription_thread(url: str, proxy: Optional[str] = None) -
 # Main function
 # ---------------------------
 def main():
-    global is_ctrl_c_pressed
+    global is_ctrl_c_pressed, TCP_TIMEOUT, HTTP_TIMEOUT, UDP_TIMEOUT
     signal.signal(signal.SIGINT, signal_handler)
 
     parser = argparse.ArgumentParser(description="Pr0xySh4rk Xray Config Merger")
@@ -609,7 +609,6 @@ def main():
     args = parser.parse_args()
 
     # Update global timeout values
-    global TCP_TIMEOUT, HTTP_TIMEOUT, UDP_TIMEOUT
     TCP_TIMEOUT = args.tcp_timeout
     HTTP_TIMEOUT = args.http_timeout
     UDP_TIMEOUT = args.udp_timeout
