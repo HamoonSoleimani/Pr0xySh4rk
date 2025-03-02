@@ -28,10 +28,23 @@ TEST_URLS = [
 ]
 # Gather the best N working configs for each protocol
 BEST_CONFIGS_LIMIT = 75
-# Timeouts (in seconds)
-HTTP_TIMEOUT = 5
-TCP_TIMEOUT = 3
-UDP_TIMEOUT = 2
+# Timeouts (in seconds) - Increased for better reliability
+TCP_TIMEOUT = 5
+HTTP_TIMEOUT = 8
+UDP_TIMEOUT = 3
+
+# Protocol-specific timeouts
+PROTOCOL_TIMEOUTS = {
+    "ss": {"tcp": 6, "http": 10},       # Shadowsocks often needs more time
+    "vless": {"tcp": 6, "http": 10},    # VLESS might need more time
+    "vmess": {"tcp": 5, "http": 8},     # VMess standard timeout
+    "tuic": {"tcp": 5, "http": 8},      # TUIC standard timeout
+    "hysteria": {"tcp": 5, "http": 8},  # Hysteria standard timeout
+    "hysteria2": {"tcp": 5, "http": 8}, # Hysteria2 standard timeout
+    "hy2": {"tcp": 5, "http": 8},       # Hy2 standard timeout
+    "warp": {"udp": 3},                 # WireGuard/WARP UDP timeout
+    "wireguard": {"udp": 3}             # WireGuard UDP timeout
+}
 
 total_outbounds_count = 0
 completed_outbounds_count = 0
@@ -120,6 +133,19 @@ def parse_ss_config(config_line: str) -> Tuple[Optional[str], Optional[int]]:
                     return server, port
                 except ValueError:
                     pass
+        else:
+            # Handle ss://BASE64 format without @
+            try:
+                base_part = remainder.split("#")[0].split("?")[0]
+                decoded = base64.b64decode(base_part).decode('utf-8')
+                if ":" in decoded and "@" in decoded:
+                    server_part = decoded.split("@", 1)[1]
+                    if ":" in server_part:
+                        server = server_part.split(":", 1)[0]
+                        port = int(server_part.split(":", 1)[1])
+                        return server, port
+            except Exception:
+                pass
     except Exception as e:
         print(f"Error parsing ss config: {e}")
     return None, None
@@ -170,11 +196,27 @@ def deduplicate_outbounds(outbounds: List[str]) -> List[str]:
     return list(dedup_dict.values())
 
 # ---------------------------
+# Get protocol-specific timeout
+# ---------------------------
+def get_protocol_timeout(protocol: str, test_type: str, default_timeout: float) -> float:
+    if protocol in PROTOCOL_TIMEOUTS and test_type in PROTOCOL_TIMEOUTS[protocol]:
+        return PROTOCOL_TIMEOUTS[protocol][test_type]
+    return default_timeout
+
+# ---------------------------
 # TCP test
 # ---------------------------
 async def tcp_test_outbound(ob: Dict[str, Any]) -> None:
     config_line = ob.get("original_config", "")
     server, port = get_server_port(config_line)
+    
+    try:
+        protocol = config_line.split("://", 1)[0].lower()
+    except Exception:
+        protocol = "unknown"
+    
+    # Get protocol-specific timeout
+    timeout = get_protocol_timeout(protocol, "tcp", TCP_TIMEOUT)
 
     if not server or not port:
         ob["tcp_delay"] = float('inf')
@@ -183,15 +225,20 @@ async def tcp_test_outbound(ob: Dict[str, Any]) -> None:
 
     loop = asyncio.get_event_loop()
     start = loop.time()
-    print(f"TCP Test for {server}:{port} started...")
+    print(f"TCP Test for {server}:{port} started (timeout: {timeout}s)...")
 
     try:
         # Resolve IP address first to ensure accurate testing
-        resolved_ip = socket.gethostbyname(server)
+        try:
+            resolved_ip = socket.gethostbyname(server)
+        except (socket.gaierror, socket.herror) as e:
+            ob["tcp_delay"] = float('inf')
+            print(f"TCP Test for {server}:{port} DNS resolution failed: {e}")
+            return
 
         # Use asyncio.wait_for to enforce a strict timeout
         conn_task = asyncio.open_connection(resolved_ip, port)
-        reader, writer = await asyncio.wait_for(conn_task, timeout=TCP_TIMEOUT)
+        reader, writer = await asyncio.wait_for(conn_task, timeout=timeout)
 
         delay = (loop.time() - start) * 1000
         writer.close()
@@ -202,12 +249,9 @@ async def tcp_test_outbound(ob: Dict[str, Any]) -> None:
 
         ob["tcp_delay"] = delay
         print(f"TCP Test for {server}:{port} finished, delay={delay:.2f} ms")
-    except (socket.gaierror, socket.herror) as e:
-        ob["tcp_delay"] = float('inf')
-        print(f"TCP Test for {server}:{port} DNS resolution failed: {e}")
     except asyncio.TimeoutError:
         ob["tcp_delay"] = float('inf')
-        print(f"TCP Test for {server}:{port} timed out after {TCP_TIMEOUT}s")
+        print(f"TCP Test for {server}:{port} timed out after {timeout}s")
     except Exception as e:
         ob["tcp_delay"] = float('inf')
         print(f"TCP Test for {server}:{port} error: {type(e).__name__} - {e}")
@@ -221,11 +265,19 @@ def tcp_test_outbound_sync(ob: Dict[str, Any]) -> None:
 
 # ---------------------------
 # HTTP test (for both HTTP and HTTPS URLs)
-# Modified: if any one repetition for any test URL fails, the config is marked as failed.
+# Modified: allow partial success for more resilient testing
 # ---------------------------
 async def http_delay_test_outbound(ob: Dict[str, Any], proxy_for_test: Optional[str], repetitions: int) -> None:
     config_line = ob.get("original_config", "")
     server, port = get_server_port(config_line)
+    
+    try:
+        protocol = config_line.split("://", 1)[0].lower()
+    except Exception:
+        protocol = "unknown"
+    
+    # Get protocol-specific timeout
+    timeout = get_protocol_timeout(protocol, "http", HTTP_TIMEOUT)
 
     if not server or not port:
         ob["http_delay"] = float('inf')
@@ -235,11 +287,20 @@ async def http_delay_test_outbound(ob: Dict[str, Any], proxy_for_test: Optional[
     session = requests.Session()
     loop = asyncio.get_event_loop()
     total_delay = 0.0
-    total_tests = 0
+    successful_tests = 0
+    total_tests_attempted = 0
+    
+    # Calculate minimum success threshold (more lenient for certain protocols)
+    if protocol in ["ss", "vless"]:
+        # For SS and VLESS, require only 40% success rate
+        min_success_ratio = 0.4
+    else:
+        # For other protocols, require 60% success rate
+        min_success_ratio = 0.6
 
     current_proxies = {'http': proxy_for_test, 'https': proxy_for_test} if proxy_for_test else None
 
-    print(f"HTTP Test for {server}:{port} started with {repetitions} repetitions for each test URL...")
+    print(f"HTTP Test for {server}:{port} started with {repetitions} repetitions (timeout: {timeout}s)...")
 
     for test_url in TEST_URLS:
         for i in range(repetitions):
@@ -248,22 +309,32 @@ async def http_delay_test_outbound(ob: Dict[str, Any], proxy_for_test: Optional[
                 ob["http_delay"] = float('inf')
                 return
 
+            total_tests_attempted += 1
             start_time = loop.time()
             try:
-                with session.get(test_url, timeout=HTTP_TIMEOUT, proxies=current_proxies, stream=True, verify=False) as response:
+                with session.get(test_url, timeout=timeout, proxies=current_proxies, stream=True, verify=False) as response:
                     response.raise_for_status()
+                    # Read some content to ensure connection works
+                    response.content
                 elapsed = (loop.time() - start_time) * 1000
                 total_delay += elapsed
-                total_tests += 1
+                successful_tests += 1
                 print(f"    [{server}:{port}] {test_url} Rep {i+1}: {elapsed:.2f} ms")
             except Exception as e:
                 print(f"    [{server}:{port}] {test_url} Rep {i+1} failed: {e}")
-                ob["http_delay"] = float('inf')
-                return
+                # Continue testing instead of immediately failing
 
-    overall_avg = total_delay / total_tests if total_tests > 0 else float('inf')
-    ob["http_delay"] = overall_avg
-    print(f"HTTP Test for {server}:{port} completed. Overall Average: {overall_avg:.2f} ms")
+    # Calculate success ratio
+    success_ratio = successful_tests / total_tests_attempted if total_tests_attempted > 0 else 0
+    print(f"HTTP Test for {server}:{port} completed. Success ratio: {success_ratio:.2f} ({successful_tests}/{total_tests_attempted})")
+    
+    if success_ratio >= min_success_ratio and successful_tests > 0:
+        overall_avg = total_delay / successful_tests
+        ob["http_delay"] = overall_avg
+        print(f"HTTP Test for {server}:{port} PASSED. Average delay: {overall_avg:.2f} ms")
+    else:
+        ob["http_delay"] = float('inf')
+        print(f"HTTP Test for {server}:{port} FAILED. Success ratio below threshold.")
 
 def http_delay_test_outbound_sync(ob: Dict[str, Any], proxy: Optional[str], repetitions: int) -> None:
     try:
@@ -281,6 +352,14 @@ async def udp_test_outbound(ob: Dict[str, Any]) -> None:
 
     # Special case for WireGuard/WARP protocols
     is_wireguard = config_line.startswith(("warp://", "wireguard://"))
+    
+    try:
+        protocol = config_line.split("://", 1)[0].lower()
+    except Exception:
+        protocol = "unknown"
+    
+    # Get protocol-specific timeout
+    timeout = get_protocol_timeout(protocol, "udp", UDP_TIMEOUT)
 
     if not server or not port:
         if is_wireguard:
@@ -305,7 +384,7 @@ async def udp_test_outbound(ob: Dict[str, Any]) -> None:
 
         loop = asyncio.get_event_loop()
         start = loop.time()
-        print(f"UDP Test for {server}:{port} ({resolved_ip}:{port}) started...")
+        print(f"UDP Test for {server}:{port} ({resolved_ip}:{port}) started (timeout: {timeout}s)...")
 
         # Create UDP socket and send a test packet using transport.sendto()
         transport, _ = await loop.create_datagram_endpoint(
@@ -326,7 +405,7 @@ async def udp_test_outbound(ob: Dict[str, Any]) -> None:
         print(f"UDP Test for {server}:{port} finished, delay={delay:.2f} ms")
     except asyncio.TimeoutError:
         ob["udp_delay"] = float('inf')
-        print(f"UDP Test for {server}:{port} timed out")
+        print(f"UDP Test for {server}:{port} timed out after {timeout}s")
     except Exception as e:
         ob["udp_delay"] = float('inf')
         print(f"UDP Test for {server}:{port} error: {type(e).__name__} - {e}")
@@ -339,7 +418,7 @@ def udp_test_outbound_sync(ob: Dict[str, Any]) -> None:
         ob["udp_delay"] = float('inf')
 
 # ---------------------------
-# Single-pass test
+# Single-pass test with protocol-specific handling
 # ---------------------------
 def single_test_pass(outbounds: List[Dict[str, Any]],
                      test_type: str,
@@ -557,6 +636,7 @@ def main():
     parser.add_argument("--tcp-timeout", type=float, default=TCP_TIMEOUT, help=f"TCP test timeout in seconds (default: {TCP_TIMEOUT})")
     parser.add_argument("--http-timeout", type=float, default=HTTP_TIMEOUT, help=f"HTTP test timeout in seconds (default: {HTTP_TIMEOUT})")
     parser.add_argument("--udp-timeout", type=float, default=UDP_TIMEOUT, help=f"UDP test timeout in seconds (default: {UDP_TIMEOUT})")
+    parser.add_argument("--protocol-stats", action="store_true", help="Show detailed stats for each protocol")  # Added protocol-stats argument
     args = parser.parse_args()
 
     # Update global timeout values
@@ -692,6 +772,37 @@ def main():
     renamed_final_outbounds = rename_configs_by_protocol(tested_outbounds)
     print(f"Renamed and limited configs: {len(renamed_final_outbounds)}")
     save_config(renamed_final_outbounds, filepath=args.output, base64_encode=not args.no_base64)
+
+    # Protocol stats (Optional)
+    if args.protocol_stats:
+        protocol_stats: Dict[str, Dict[str, Any]] = {}
+        for config in tested_outbounds:
+            config_line = config["original_config"]
+            protocol = config_line.split("://")[0].lower() if "://" in config_line else "unknown"
+            if protocol not in protocol_stats:
+                protocol_stats[protocol] = {
+                    "count": 0,
+                    "total_delay": 0.0,
+                    "min_delay": float('inf'),
+                    "max_delay": 0.0
+                }
+            protocol_stats[protocol]["count"] += 1
+            delay = config.get("combined_delay", float('inf'))
+            if delay != float('inf'):
+                protocol_stats[protocol]["total_delay"] += delay
+                protocol_stats[protocol]["min_delay"] = min(protocol_stats[protocol]["min_delay"], delay)
+                protocol_stats[protocol]["max_delay"] = max(protocol_stats[protocol]["max_delay"], delay)
+
+        print("\n--- Protocol Statistics ---")
+        for protocol, stats in protocol_stats.items():
+            avg_delay = stats["total_delay"] / stats["count"] if stats["count"] > 0 else float('inf')
+            print(f"Protocol: {protocol}")
+            print(f"  Count: {stats['count']}")
+            print(f"  Average Delay: {avg_delay:.2f} ms" if avg_delay != float('inf') else "N/A")
+            print(f"  Min Delay: {stats['min_delay']:.2f} ms" if stats['min_delay'] != float('inf') else "N/A")
+            print(f"  Max Delay: {stats['max_delay']:.2f} ms" if stats['max_delay'] != 0.0 else "N/A")
+            print("-" * 20)
+
 
     for var, value in original_env.items():
         os.environ[var] = value
