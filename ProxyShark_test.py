@@ -821,7 +821,12 @@ def rename_configs_by_protocol(configs: List[ProxyConfig]) -> List[str]:
 
     # Group by protocol
     for config in configs:
-        abbr = config.PROTOCOL_ABBREVIATIONS.get(config.protocol, "UN")
+        abbr = config.protocol.value
+        # Fix: Use the global config's PROTOCOL_ABBREVIATIONS instead of trying to access it from ProxyConfig
+        if config.protocol in config.PROTOCOL_ABBREVIATIONS:
+            abbr = config.PROTOCOL_ABBREVIATIONS[config.protocol]
+        else:
+            abbr = "UN"  # Default to unknown if not found
         protocol_groups.setdefault(abbr, []).append(config)
 
     for abbr, conf_list in protocol_groups.items():
