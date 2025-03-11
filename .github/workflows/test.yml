@@ -22,13 +22,12 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests aiohttp # Added aiohttp here
 
       - name: Run ProxyShark_test Script
         run: |
           python ProxyShark_test.py --input subs.txt --output Pr0xySh4rk_test.txt -r 5 --test tcp+http
-      
-                
+
       - name: Commit and Push Changes
         env:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
