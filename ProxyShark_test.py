@@ -132,8 +132,8 @@ class Config:
         Protocol.VMESS: "VM",
         Protocol.TUIC: "TU",
         Protocol.HYSTERIA: "HY",
-        Protocol.HYSTERIA2: "HY2",  # Corrected HYSTERIA2 abbreviation
-        Protocol.HY2: "HY2",        # Corrected HY2 abbreviation
+        Protocol.HYSTERIA2: "HY",
+        Protocol.HY2: "HY",
         Protocol.WARP: "WG",
         Protocol.WIREGUARD: "WG",
         Protocol.UNKNOWN: "UN"
@@ -820,14 +820,14 @@ def rename_configs_by_protocol(configs: List[ProxyConfig]) -> List[str]:
     renamed_configs = []
 
     # Group by protocol
-    for config in configs:
-        abbr = config.protocol.value
+    for config_item in configs:
+        abbr = config_item.protocol.value
         # Use the global config's PROTOCOL_ABBREVIATIONS
-        if config.protocol in config.PROTOCOL_ABBREVIATIONS:
-            abbr = config.PROTOCOL_ABBREVIATIONS[config.protocol]
+        if config_item.protocol in config.PROTOCOL_ABBREVIATIONS:
+            abbr = config.PROTOCOL_ABBREVIATIONS[config_item.protocol]
         else:
             abbr = "UN"  # Default to unknown if not found
-        protocol_groups.setdefault(abbr, []).append(config)
+        protocol_groups.setdefault(abbr, []).append(config_item)
 
     for abbr, conf_list in protocol_groups.items():
         # Filter for valid configs and sort by combined delay
