@@ -131,9 +131,9 @@ class Config:
         Protocol.VLESS: "VL",
         Protocol.VMESS: "VM",
         Protocol.TUIC: "TU",
-        Protocol.HYSTERIA: "HY", 
-        Protocol.HYSTERIA2: "HY",
-        Protocol.HY2: "HY",
+        Protocol.HYSTERIA: "HY",
+        Protocol.HYSTERIA2: "HY2",  # Corrected HYSTERIA2 abbreviation
+        Protocol.HY2: "HY2",        # Corrected HY2 abbreviation
         Protocol.WARP: "WG",
         Protocol.WIREGUARD: "WG",
         Protocol.UNKNOWN: "UN"
@@ -156,7 +156,7 @@ class ProxyConfig:
     last_tested: float = 0.0
     successful_tests: int = 0
     total_tests: int = 0
-    
+
     def __post_init__(self):
         """Extract protocol, server, and port after initialization."""
         try:
@@ -220,7 +220,7 @@ async def check_ip_location(ip_address: str) -> str:
     """Check the geographic location of an IP address."""
     if not config.CHECK_IP_LOCATION:
         return ""
-        
+
     async with aiohttp.ClientSession() as session:
         for service_url in config.IP_LOCATION_SERVICES:
             try:
@@ -243,15 +243,15 @@ async def fetch_content_async(url: str, proxy: Optional[str] = None, timeout: fl
     """Fetch content from URL using aiohttp."""
     if timeout is None:
         timeout = config.HTTP_TIMEOUT
-        
+
     proxy_str = proxy if proxy else None
     logger.debug(f"Fetching {url} {'using proxy: ' + proxy if proxy else 'directly'}")
-    
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                url, 
-                proxy=proxy_str, 
+                url,
+                proxy=proxy_str,
                 timeout=aiohttp.ClientTimeout(total=timeout),
                 ssl=False  # Disable SSL verification for testing
             ) as response:
@@ -267,7 +267,7 @@ def fetch_content(url: str, proxy: Optional[str] = None, timeout: float = None) 
     """Synchronous wrapper for fetch_content_async."""
     if timeout is None:
         timeout = config.HTTP_TIMEOUT
-        
+
     try:
         return asyncio.run(fetch_content_async(url, proxy, timeout))
     except Exception as e:
@@ -297,7 +297,7 @@ def parse_config_content(content: str) -> List[str]:
                     outbounds.append(line)
     except Exception as e:
         logger.error(f"Error processing content: {e}")
-    
+
     return outbounds
 
 def parse_vmess_config(config_line: str) -> Tuple[Optional[str], Optional[int]]:
@@ -305,19 +305,19 @@ def parse_vmess_config(config_line: str) -> Tuple[Optional[str], Optional[int]]:
     try:
         # For vmess, the part after vmess:// is base64 encoded
         remainder = config_line.split("://", 1)[1]
-        
+
         # Handle trailing fragments or query parameters
         if "#" in remainder:
             remainder = remainder.split("#")[0]
         if "?" in remainder:
             remainder = remainder.split("?")[0]
-            
+
         decoded = base64.b64decode(remainder).decode("utf-8")
         data = json.loads(decoded)
-        
+
         server = data.get("add")
         port = int(data.get("port")) if data.get("port") else None
-        
+
         return server, port
     except Exception as e:
         logger.debug(f"Error parsing vmess config: {e}")
@@ -328,7 +328,7 @@ def parse_ss_config(config_line: str) -> Tuple[Optional[str], Optional[int]]:
     try:
         # ss://BASE64(method:password)@server:port
         remainder = config_line.split("://", 1)[1]
-        
+
         if "@" in remainder:
             server_part = remainder.split("@", 1)[1]
             if ":" in server_part:
@@ -354,7 +354,7 @@ def parse_ss_config(config_line: str) -> Tuple[Optional[str], Optional[int]]:
                 pass
     except Exception as e:
         logger.debug(f"Error parsing ss config: {e}")
-    
+
     return None, None
 
 def parse_wireguard_config(config_line: str) -> Tuple[Optional[str], Optional[int]]:
@@ -362,7 +362,7 @@ def parse_wireguard_config(config_line: str) -> Tuple[Optional[str], Optional[in
     try:
         parsed = urllib.parse.urlparse(config_line)
         query_params = urllib.parse.parse_qs(parsed.query)
-        
+
         # Look for endpoint in query parameters
         if "endpoint" in query_params:
             endpoint = query_params["endpoint"][0]
@@ -370,7 +370,7 @@ def parse_wireguard_config(config_line: str) -> Tuple[Optional[str], Optional[in
                 server, port_str = endpoint.split(":", 1)
                 port = int(port_str)
                 return server, port
-        
+
         # Try to get from path for some implementations
         if parsed.netloc:
             if ":" in parsed.netloc:
@@ -380,7 +380,7 @@ def parse_wireguard_config(config_line: str) -> Tuple[Optional[str], Optional[in
                     return server, port
                 except ValueError:
                     pass
-                    
+
         # Fallback to hostname and port from URL
         return parsed.hostname, parsed.port
     except Exception as e:
@@ -392,9 +392,9 @@ def get_server_port(config_line: str) -> Tuple[Optional[str], Optional[int]]:
     try:
         if "://" not in config_line:
             return None, None
-            
+
         protocol = Protocol.from_string(config_line.split("://", 1)[0].lower())
-        
+
         if protocol == Protocol.VMESS:
             return parse_vmess_config(config_line)
         elif protocol == Protocol.SHADOWSOCKS:
@@ -413,12 +413,12 @@ def get_dedup_key(config: str) -> tuple:
     """Create a deduplication key based on protocol, server, and port."""
     if "://" not in config:
         return (config,)
-    
+
     try:
         scheme = config.split("://", 1)[0].lower()
         protocol = Protocol.from_string(scheme)
         server, port = get_server_port(config)
-        
+
         # Enhanced deduplication by adding protocol
         return (protocol.value, server, port)
     except Exception as e:
@@ -433,12 +433,12 @@ def deduplicate_outbounds(configs: List[Union[str, ProxyConfig]]) -> List[Union[
             config_str = config_item.original_config
         else:
             config_str = config_item
-            
+
         key = get_dedup_key(config_str)
         if key[1] is not None and key[2] is not None:  # Only include configs with valid server and port
             if key not in dedup_dict:
                 dedup_dict[key] = config_item
-    
+
     logger.info(f"Deduplicated {len(configs)} configs to {len(dedup_dict)} unique configs")
     return list(dedup_dict.values())
 
@@ -453,11 +453,11 @@ def get_protocol_timeout(protocol: Protocol, test_type: str, default_timeout: fl
 async def tcp_test_outbound(proxy_config: ProxyConfig) -> None:
     """Test TCP connectivity to a proxy server."""
     server, port = proxy_config.server, proxy_config.port
-    
+
     # Get protocol-specific timeout
     timeout = get_protocol_timeout(
-        proxy_config.protocol, 
-        "tcp", 
+        proxy_config.protocol,
+        "tcp",
         config.TCP_TIMEOUT
     )
 
@@ -509,11 +509,11 @@ def tcp_test_outbound_sync(proxy_config: ProxyConfig) -> None:
 async def http_delay_test_outbound(proxy_config: ProxyConfig, proxy_for_test: Optional[str], repetitions: int) -> None:
     """Test HTTP(S) connectivity through a proxy server."""
     server, port = proxy_config.server, proxy_config.port
-    
+
     # Get protocol-specific timeout
     timeout = get_protocol_timeout(
-        proxy_config.protocol, 
-        "http", 
+        proxy_config.protocol,
+        "http",
         config.HTTP_TIMEOUT
     )
 
@@ -524,25 +524,25 @@ async def http_delay_test_outbound(proxy_config: ProxyConfig, proxy_for_test: Op
 
     # Get minimum success threshold based on protocol
     min_success_ratio = config.MIN_SUCCESS_RATIO.get(
-        proxy_config.protocol, 
+        proxy_config.protocol,
         config.MIN_SUCCESS_RATIO[Protocol.UNKNOWN]
     )
 
     current_proxies = {'http': proxy_for_test, 'https': proxy_for_test} if proxy_for_test else None
-    
+
     logger.debug(f"HTTP Test for {server}:{port} started with {repetitions} repetitions (timeout: {timeout}s)...")
-    
+
     total_delay = 0.0
     proxy_config.successful_tests = 0
     proxy_config.total_tests = 0
-    
+
     # Shuffle test URLs for more robust testing
     test_urls = config.TEST_URLS.copy()
     random.shuffle(test_urls)
-    
+
     session = requests.Session()
     loop = asyncio.get_event_loop()
-    
+
     for test_url in test_urls:
         for i in range(repetitions):
             if config.is_ctrl_c_pressed:
@@ -557,16 +557,16 @@ async def http_delay_test_outbound(proxy_config: ProxyConfig, proxy_for_test: Op
                 response_future = loop.run_in_executor(
                     None,
                     lambda: session.get(
-                        test_url, 
-                        timeout=timeout, 
-                        proxies=current_proxies, 
-                        stream=True, 
+                        test_url,
+                        timeout=timeout,
+                        proxies=current_proxies,
+                        stream=True,
                         verify=False
                     )
                 )
-                
+
                 response = await asyncio.wait_for(response_future, timeout=timeout * 1.1)
-                
+
                 # Check status and read some content
                 if response.status_code == 200:
                     # Read at least some content to ensure connection works
@@ -605,14 +605,14 @@ def http_delay_test_outbound_sync(proxy_config: ProxyConfig, proxy: Optional[str
 async def udp_test_outbound(proxy_config: ProxyConfig) -> None:
     """Test UDP connectivity for WireGuard/WARP protocols."""
     server, port = proxy_config.server, proxy_config.port
-    
+
     # Special case for WireGuard/WARP protocols
     is_wireguard = proxy_config.protocol in (Protocol.WIREGUARD, Protocol.WARP)
-    
+
     # Get protocol-specific timeout
     timeout = get_protocol_timeout(
-        proxy_config.protocol, 
-        "udp", 
+        proxy_config.protocol,
+        "udp",
         config.UDP_TIMEOUT
     )
 
@@ -648,10 +648,10 @@ async def udp_test_outbound(proxy_config: ProxyConfig) -> None:
 
         # Send a test packet
         transport.sendto(b'\x00\x00\x00\x00')
-        
+
         # Give some time for potential errors to surface
         await asyncio.sleep(0.1)
-        
+
         delay = (loop.time() - start) * 1000
         transport.close()
 
@@ -736,12 +736,12 @@ def single_test_pass(
                 if config.is_ctrl_c_pressed:
                     break
 
-                if (outbounds[index].protocol not in (Protocol.WIREGUARD, Protocol.WARP) and 
+                if (outbounds[index].protocol not in (Protocol.WIREGUARD, Protocol.WARP) and
                     outbounds[index].tcp_delay != float('inf')):
                     future_http = executor.submit(
-                        http_delay_test_outbound_sync, 
-                        outbounds[index], 
-                        proxy_for_test, 
+                        http_delay_test_outbound_sync,
+                        outbounds[index],
+                        proxy_for_test,
                         repetitions
                     )
                     futures_map[index].append(future_http)
@@ -775,8 +775,8 @@ def single_test_pass(
 # ---- Output Functions ----
 
 def save_config(
-    outbounds: List[str], 
-    filepath: str = "merged_configs.txt", 
+    outbounds: List[str],
+    filepath: str = "merged_configs.txt",
     base64_encode: bool = True,
     include_metadata: bool = False
 ):
@@ -784,7 +784,7 @@ def save_config(
     try:
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
-        
+
         if include_metadata and filepath.endswith('.json'):
             # Save full metadata as JSON
             with open(filepath, "w") as outfile:
@@ -795,13 +795,13 @@ def save_config(
                 json.dump(json_data, outfile, indent=2)
             logger.info(f"Config metadata saved to {filepath}")
             return
-            
+
         # Standard text output (with optional base64 encoding)
         if isinstance(outbounds[0], ProxyConfig):
             combined = "\n".join(proxy.original_config for proxy in outbounds)
         else:
             combined = "\n".join(outbounds)
-            
+
         if base64_encode:
             encoded = base64.b64encode(combined.encode()).decode("utf-8")
             with open(filepath, "w") as outfile:
@@ -822,7 +822,7 @@ def rename_configs_by_protocol(configs: List[ProxyConfig]) -> List[str]:
     # Group by protocol
     for config in configs:
         abbr = config.protocol.value
-        # Fix: Use the global config's PROTOCOL_ABBREVIATIONS instead of trying to access it from ProxyConfig
+        # Use the global config's PROTOCOL_ABBREVIATIONS
         if config.protocol in config.PROTOCOL_ABBREVIATIONS:
             abbr = config.PROTOCOL_ABBREVIATIONS[config.protocol]
         else:
@@ -840,13 +840,13 @@ def rename_configs_by_protocol(configs: List[ProxyConfig]) -> List[str]:
         for i, proxy_config in enumerate(limited_list, start=1):
             config_line = proxy_config.original_config
             new_tag = f"🔒Pr0xySh4rk🦈{abbr}{i:02d}"
-            
+
             if "#" in config_line:
                 base_part = config_line.split("#")[0].rstrip()
                 new_config = f"{base_part}#{urllib.parse.quote(new_tag)}"
             else:
                 new_config = f"{config_line}#{urllib.parse.quote(new_tag)}"
-                
+
             renamed_configs.append(new_config)
 
     return renamed_configs
@@ -857,13 +857,13 @@ async def fetch_and_parse_subscription_async(url: str, proxy: Optional[str] = No
     """Fetch and parse a subscription URL asynchronously."""
     pid = os.getpid()
     logger.info(f"Thread {pid}: Fetching: {url}")
-    
+
     content = await fetch_content_async(url, proxy)
 
     if not content:
         logger.warning(f"Thread {pid}: Failed to fetch {url}")
         return []
-        
+
     normalized_content = content.strip().replace("\n", "").replace("\r", "").replace(" ", "")
     try:
         # Try base64 decoding
@@ -878,13 +878,13 @@ async def fetch_and_parse_subscription_async(url: str, proxy: Optional[str] = No
     if not outbounds_list:
         logger.warning(f"Thread {pid}: No outbounds parsed from {url}")
         return []
-        
+
     # Convert to ProxyConfig objects
     proxy_configs = []
     for ob in outbounds_list:
         proxy_config = ProxyConfig(original_config=ob, source=url)
         proxy_configs.append(proxy_config)
-    
+
     logger.info(f"Thread {pid}: Parsed {len(proxy_configs)} outbounds from {url}")
     return proxy_configs
 
@@ -920,7 +920,7 @@ async def async_main():
     # Set logging level based on verbose flag
     if args.verbose:
         logger.setLevel(logging.DEBUG)
-    
+
     # Update global timeout values
     config.TCP_TIMEOUT = args.tcp_timeout
     config.HTTP_TIMEOUT = args.http_timeout
@@ -962,7 +962,7 @@ async def async_main():
 
     # Fetch and parse subscription URLs
     logger.info(f"Fetching {len(subscription_urls)} subscription URLs...")
-    
+
     parsed_outbounds_lists = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
         futures = [
@@ -1003,7 +1003,7 @@ async def async_main():
 
     # Combine configs for testing
     combined_outbounds_for_test = other_configs + wireguard_warp_configs
-    
+
     # Run tests based on specified test type
     if args.test == "tcp+http":
         logger.info("\n=== Testing all configs (TCP+HTTP for regular configs, UDP for WG/WARP) ===")
@@ -1033,10 +1033,10 @@ async def async_main():
             ob.combined_delay = ob.udp_delay
     elif args.test == "tcp":
         single_test_pass(
-            unique_outbounds, 
-            "tcp", 
-            args.threads, 
-            args.test_proxy, 
+            unique_outbounds,
+            "tcp",
+            args.threads,
+            args.test_proxy,
             args.repetitions
         )
         tested_outbounds = [ob for ob in unique_outbounds if ob.tcp_delay != float('inf')]
@@ -1044,10 +1044,10 @@ async def async_main():
             ob.combined_delay = ob.tcp_delay
     elif args.test == "http":
         single_test_pass(
-            unique_outbounds, 
-            "http", 
-            args.threads, 
-            args.test_proxy, 
+            unique_outbounds,
+            "http",
+            args.threads,
+            args.test_proxy,
             args.repetitions
         )
         tested_outbounds = [ob for ob in unique_outbounds if ob.http_delay != float('inf')]
@@ -1055,10 +1055,10 @@ async def async_main():
             ob.combined_delay = ob.http_delay
     elif args.test == "udp":
         single_test_pass(
-            unique_outbounds, 
-            "udp", 
-            args.threads, 
-            args.test_proxy, 
+            unique_outbounds,
+            "udp",
+            args.threads,
+            args.test_proxy,
             args.repetitions
         )
         tested_outbounds = [ob for ob in unique_outbounds if ob.udp_delay != float('inf')]
@@ -1074,7 +1074,7 @@ async def async_main():
         if args.save_metadata:
             metadata_path = f"{os.path.splitext(args.output)[0]}_metadata.json"
             save_config(tested_outbounds, filepath=metadata_path, base64_encode=False, include_metadata=True)
-            
+
         # Rename and limit configs by protocol
         renamed_final_outbounds = rename_configs_by_protocol(tested_outbounds)
         logger.info(f"Renamed and limited configs: {len(renamed_final_outbounds)}")
