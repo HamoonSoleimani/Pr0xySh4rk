@@ -1,0 +1,47 @@
+name: ProxyShark_test2 Daily Config Update
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Runs every day at midnight UTC; adjust as needed.
+  workflow_dispatch:
+
+jobs:
+  update-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.x
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests aiohttp # Added aiohttp here
+
+      - name: Run ProxyShark_test2 Script
+        run: |
+          python ProxyShark_test2.py --input subs.txt --output Pr0xySh4rk_test2.txt -r 5 --test tcp+http
+
+      - name: Commit and Push Changes
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
+          git fetch origin main
+          # Use autostash to handle unstaged changes
+          git pull --rebase --autostash origin main
+          git add Pr0xySh4rk_test2.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Update Pr0xySh4rk_test2.txt via GitHub Actions"
+            git push origin HEAD:main
+          else
+            echo "No changes to commit."
+          fi
