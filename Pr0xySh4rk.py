@@ -378,7 +378,11 @@ def measure_latency_precise(proxy: str,
                             count: int = 5,
                             timeout: int = 20) -> float:
     if shutil.which("proxychains4") and shutil.which("fping"):
-        return measure_latency_icmp_proxychains(target_host, proxy, count, timeout)
+        latency = measure_latency_icmp_proxychains(target_host, proxy, count, timeout)
+        if latency == float('inf'):
+            print("ICMP latency measurement failed, falling back to HTTP test.")
+            latency = measure_xray_latency_http(proxy, timeout=timeout)
+        return latency
     else:
         print("proxychains4 or fping not found, falling back to HTTP test.")
         return measure_xray_latency_http(proxy, timeout=timeout)
@@ -1427,13 +1431,28 @@ def main():
         with open(args.input, "rb") as f:
             encoded_content = f.read().strip()
         try:
-            decoded_content = base64.b64decode(encoded_content).decode("utf-8")
+            # Attempt base64 decoding, strict validation
+            decoded_content = base64.b64decode(encoded_content, validate=True).decode("utf-8")
             subscription_urls = [line.strip() for line in decoded_content.splitlines() if line.strip()]
             print("Subscription URLs decoded from base64 input file.")
-        except Exception as e:
-            print(f"Base64 decoding failed: {e}. Trying plain text.")
-            with open(args.input, "r") as f2:
-                subscription_urls = [line.strip() for line in f2 if line.strip()]
+        except (ValueError, UnicodeDecodeError) as e:  # Catch specific errors
+            print(f"Base64 decoding failed: {e}. Trying plain text with multiple encodings.")
+            # Try multiple encodings, starting with the most likely
+            encodings = ["utf-8", "latin-1", "cp1252"]
+            decoded_content = None
+            for enc in encodings:
+                try:
+                    with open(args.input, "r", encoding=enc) as f2:
+                        decoded_content = f2.read()
+                        break  # If successful, exit encoding loop
+                except UnicodeDecodeError:
+                    continue  # Try the next encoding
+            if decoded_content is not None:
+              subscription_urls = [line.strip() for line in decoded_content.splitlines() if line.strip()]
+            else:
+              print("Error: could not read input file as text.")
+              sys.exit(1)  # Exit with error.
+
     except FileNotFoundError:
         print(f"Error: {args.input} not found.")
         return
