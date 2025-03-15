@@ -61,7 +61,7 @@ jobs:
 
       - name: Run Pr0xySh4rkTest Script
         run: |
-          python Pr0xySh4rk.py --input subs1.txt --output Pr0xySh4rkTest.txt --test real
+          python Pr0xySh4rk3.py --input subs1.txt --output Pr0xySh4rkTest.txt --test real
 
       - name: Commit and Push Changes
         env:
