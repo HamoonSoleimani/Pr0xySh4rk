@@ -44,7 +44,7 @@ jobs:
       - name: Run Pr0xySh4rkTest Script
         run: |
           # Run the script with its parameters. Adjust filenames and options as needed.
-          python Pr0xySh4rk.py --input subs1.txt --output Pr0xySh4rkTest.txt --test tcp+http+real
+          python Pr0xySh4rk.py --input subs1.txt --output Pr0xySh4rkTest.txt --test real
 
       - name: Commit and Push Changes
         env:
