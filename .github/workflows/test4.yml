@@ -29,18 +29,16 @@ jobs:
           sudo setcap cap_net_raw+ep /usr/bin/fping
 
       - name: Check if Xray folder exists (Method 2: Folder)
-        id: check_xray_folder  # Important:  We need an ID here
+        id: check_xray_folder
         run: |
           if [ -d "xray" ]; then
-            echo "XRAY_FOLDER_EXISTS=true"
-            echo "::set-output name=folder_exists::true" # Set an output variable
-          else
-            echo "XRAY_FOLDER_EXISTS=false"
-            echo "::set-output name=folder_exists::false" # Set an output variable
+            echo "::set-output name=folder_exists::true"
+          else:
+            echo "::set-output name=folder_exists::false"
           fi
 
       - name: Download and Install Xray-core (Method 1: Download)
-        if: ${{ steps.check_xray_folder.outputs.folder_exists != 'true' }}  # Corrected if condition
+        if: ${{ steps.check_xray_folder.outputs.folder_exists != 'true' }}
         run: |
           LATEST_RELEASE=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')
           wget -q "https://github.com/XTLS/Xray-core/releases/download/${LATEST_RELEASE}/Xray-linux-64.zip" -O Xray.zip
@@ -49,10 +47,9 @@ jobs:
           sudo mv xray/xray /usr/local/bin/xray
           sudo mv xray/geosite.dat /usr/local/bin/
           sudo mv xray/geoip.dat /usr/local/bin/
-        continue-on-error: true
 
       - name: Copy Xray files (Method 2: Folder)
-        if: ${{ steps.check_xray_folder.outputs.folder_exists == 'true' }}  # Corrected if condition
+        if: ${{ steps.check_xray_folder.outputs.folder_exists == 'true' }}
         run: |
           sudo cp xray/xray /usr/local/bin/
           sudo cp xray/geosite.dat /usr/local/bin/
