@@ -1,8 +1,8 @@
-name: Pr0xySh4rkTest3 Daily Config Update
+name: Pr0xySh4rkTest Daily Config Update
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *'  # Runs every day at midnight UTC
   workflow_dispatch:
 
 jobs:
@@ -20,45 +20,24 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Set executable permissions for Xray-core
+        run: |
+          chmod +x ./xray/xray
+          ls -la ./xray
+
+      - name: Add xray folder to PATH
+        run: echo "$(pwd)/xray" >> $GITHUB_PATH
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests[socks]
           sudo apt-get update
-          # Install fping and set capabilities (CRITICAL FIX)
           sudo apt-get install -y proxychains4 fping wget unzip
-          sudo setcap cap_net_raw+ep /usr/bin/fping
 
-      - name: Download and Install Xray-core (Method 1: Download)
-        if: ${{ !env.XRAY_FOLDER_EXISTS }}  # Conditional execution
+      - name: Run Pr0xySh4rkTest Script
         run: |
-          LATEST_RELEASE=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')
-          wget -q "https://github.com/XTLS/Xray-core/releases/download/${LATEST_RELEASE}/Xray-linux-64.zip" -O Xray.zip
-          unzip -o Xray.zip -d xray
-          chmod +x xray/xray
-          sudo mv xray/xray /usr/local/bin/xray
-          sudo mv xray/geosite.dat /usr/local/bin/
-          sudo mv xray/geoip.dat /usr/local/bin/
-        continue-on-error: true  # Allow workflow to continue even if download fails
-
-      - name: Check if Xray folder exists (Method 2: Folder)
-        id: check_xray_folder
-        run: |
-          if [ -d "xray" ]; then
-            echo "XRAY_FOLDER_EXISTS=true" >> $GITHUB_ENV
-          else
-            echo "XRAY_FOLDER_EXISTS=false" >> $GITHUB_ENV
-
-      - name: Copy Xray files (Method 2: Folder)
-        if: ${{ env.XRAY_FOLDER_EXISTS }}  # Only run if folder exists
-        run: |
-          sudo cp xray/xray /usr/local/bin/
-          sudo cp xray/geosite.dat /usr/local/bin/
-          sudo cp xray/geoip.dat /usr/local/bin/
-          sudo chmod +x /usr/local/bin/xray
-
-      - name: Run Pr0xySh4rkTest3 Script
-        run: |
+          # Adjust the input/output filenames and test options as needed
           python Pr0xySh4rk3.py --input subs1.txt --output Pr0xySh4rkTest.txt --test real
 
       - name: Commit and Push Changes
@@ -67,13 +46,7 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
-          git fetch origin main
-          git pull --rebase --autostash origin main
           git add Pr0xySh4rkTest.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "Update Pr0xySh4rkTest.txt via GitHub Actions"
-            git push origin HEAD:main
-          else:
-            echo "No changes to commit."
-          fi
+          git commit -m "Update config"
+          git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
+          git push
