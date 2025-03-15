@@ -3,68 +3,103 @@ name: Pr0xySh4rkTest1 Daily Config Update
 on:
   schedule:
     - cron: '0 0 * * *'  # Runs every day at midnight UTC; adjust as needed.
-  workflow_dispatch:
+  workflow_dispatch:  # Allows manual triggering of the workflow
 
 jobs:
   update-config:
-    runs-on: ubuntu-latest
-    # Add CAP_NET_RAW capability for ICMP, and map port 1080
-    container:
-      image: ubuntu:latest
-      options: --cap-add=NET_RAW -p 1080:1080
+    runs-on: ubuntu-latest  # Use the default GitHub-hosted runner (Ubuntu)
 
+    # We are NOT using a custom container.  The default runner is well-configured for Python.
+    # The 'container' section has been completely removed.
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v3  # Checkout the repository's code
         with:
-          persist-credentials: false
+          persist-credentials: false  # Avoid keeping Git credentials in the runner
 
       - name: Set up Python 3.x
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v4  # Install and configure Python
         with:
-          python-version: '3.x'
+          python-version: '3.x'  # Use the latest stable 3.x version of Python
 
       - name: Install Dependencies
         run: |
+          # Upgrade pip to the latest version.  Use 'python -m pip' to ensure we're
+          # using the pip associated with the Python interpreter set up by actions/setup-python.
           python -m pip install --upgrade pip
-          pip install requests[socks]  # Install requests with SOCKS support
+
+          # Install requests with SOCKS support. Again, use 'python -m pip'.
+          python -m pip install requests[socks]
+
+          # Install system dependencies using apt-get. We need sudo here because
+          # we're installing system-level packages on the GitHub-hosted runner.
           sudo apt-get update
-          sudo apt-get install -y proxychains4 fping wget unzip  # Use proxychains4
+          sudo apt-get install -y proxychains4 fping wget unzip
 
       - name: Download and Install Xray-core
         run: |
-          # Download the latest Xray-core release.
+          # Download the latest Xray-core release dynamically.  This fetches the
+          # latest release tag from the GitHub API.
           LATEST_RELEASE=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')
           wget -q "https://github.com/XTLS/Xray-core/releases/download/${LATEST_RELEASE}/Xray-linux-64.zip" -O Xray.zip
-          # Unzip the downloaded file.
+
+          # Unzip the downloaded file.  The '-o' flag overwrites existing files
+          # without prompting.
           unzip -o Xray.zip -d xray
-          # Mark the xray binary as executable.
+
+          # Make the xray binary executable.
           chmod +x xray/xray
-          # Move the xray-core binary into /usr/local/bin (requires sudo privileges on ubuntu-latest).
+
+          # Move the xray-core binary and data files into /usr/local/bin, which
+          # is a standard location for user-installed binaries and is in the PATH.
+          # This requires sudo on the GitHub-hosted runner.
           sudo mv xray/xray /usr/local/bin/xray
           sudo mv xray/geosite.dat /usr/local/bin/
           sudo mv xray/geoip.dat /usr/local/bin/
 
       - name: Run Pr0xySh4rkTest1 Script
         run: |
-          # Run the script with its parameters. Adjust filenames and options as needed.
-          python Pr0xySh4rk1.py --input subs1.txt --output Pr0xySh4rkTest.txt --test real
+          # Execute the Python script with the specified arguments.
+          # Adjust the filenames and options as needed to match your setup.
+          python Pr0xySh4rk1.py --input subs1.txt --output Pr0xySh4rkTest.txt --test tcp+http+real
 
       - name: Commit and Push Changes
         env:
+          # Use a Personal Access Token (PAT) for authentication.  This is stored
+          # as a secret in the repository settings.  The PAT needs "repo" scope.
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
+          # Configure Git user information.  This is required for committing.
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+
+          # Set the remote URL to use the PAT for authentication.  This allows
+          # the workflow to push changes back to the repository.
           git remote set-url origin https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git
+
+          # Fetch the latest changes from the 'main' branch.
           git fetch origin main
-          # Pull any changes from remote to avoid conflicts.
+
+          # Pull and rebase any changes from the remote 'main' branch to avoid
+          # conflicts.  '--autostash' automatically stashes any local changes
+          # before rebasing and then unstashes them afterward.
           git pull --rebase --autostash origin main
+
+          # Add the updated Pr0xySh4rkTest.txt file to the staging area.
           git add Pr0xySh4rkTest.txt
+
+          # Check if there are any staged changes.  If there are no changes,
+          # we don't need to commit or push.
           if ! git diff --cached --quiet; then
+            # Commit the changes with a descriptive message.
             git commit -m "Update Pr0xySh4rkTest.txt via GitHub Actions"
+
+            # Push the changes to the 'main' branch.  'HEAD:main' specifies that
+            # the current branch (HEAD) should be pushed to the 'main' branch
+            # on the remote.
             git push origin HEAD:main
-          else:
+          else
+            # If there are no changes, print a message to the log.
             echo "No changes to commit."
           fi
