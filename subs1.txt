@@ -1,0 +1,2 @@
+https://raw.githubusercontent.com/NiREvil/vless/refs/heads/main/sub/v2rayng-wg.txt
+https://raw.githubusercontent.com/Mosifree/-FREE2CONFIG/refs/heads/main/Reality
