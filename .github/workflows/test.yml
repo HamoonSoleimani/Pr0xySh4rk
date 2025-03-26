@@ -1,0 +1,171 @@
+name: test1 Real Test Update
+
+on:
+  schedule:
+    # Runs every day at 02:00 UTC (adjust cron schedule as needed)
+    - cron: '0 2 * * *'
+  workflow_dispatch: # Allows manual triggering from the Actions tab
+
+# Set permissions for the GITHUB_TOKEN to allow pushing commits
+permissions:
+  contents: write
+
+jobs:
+  update-real-config:
+    runs-on: ubuntu-latest
+    # Timeout for the entire job (e.g., 60 minutes)
+    # Adjust based on typical runtime of your --test real runs
+    timeout-minutes: 60
+
+    env:
+      # Define Xray-core version for easy updating
+      # Check https://github.com/XTLS/Xray-core/releases for the latest stable version
+      XRAY_VERSION: "1.8.10"
+      # Define input/output filenames
+      INPUT_FILE: "subs1.txt"
+      OUTPUT_FILE: "onlyreal.txt"
+      # Adjust thread count based on runner resources and testing observations
+      SCRIPT_THREADS: 12
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        # No explicit token needed here; GITHUB_TOKEN with 'contents: write' permission is used by default for push
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip' # Cache pip dependencies
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update -y
+          # wget for downloading, unzip for extracting, proxychains4/fping for potential ICMP tests
+          sudo apt-get install -y --no-install-recommends wget unzip proxychains4 fping 
+        # Add error checking if needed, though apt-get usually fails clearly
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install only necessary libraries used by the script
+          pip install requests urllib3
+          # Add any other direct dependencies of your script if needed
+
+      - name: Download and Install Xray-core
+        run: |
+          set -e # Exit immediately if a command exits with a non-zero status.
+
+          echo "Downloading Xray-core v${XRAY_VERSION}..."
+          wget --quiet --show-progress --progress=bar:force:noscroll \
+               "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" \
+               -O xray-release.zip
+
+          echo "Unzipping Xray-core..."
+          unzip -o xray-release.zip -d xray_temp
+
+          echo "Installing Xray-core to /usr/local/bin/..."
+          sudo mv xray_temp/xray /usr/local/bin/xray
+          sudo chmod +x /usr/local/bin/xray
+
+          echo "Cleaning up..."
+          rm -f xray-release.zip
+          rm -rf xray_temp
+
+          echo "Verifying Xray installation..."
+          if ! command -v xray &> /dev/null; then
+            echo "::error::xray command not found after installation attempt."
+            exit 1
+          fi
+          xray version || { echo "::error::xray version command failed."; exit 1; }
+          echo "Xray-core installed successfully."
+        # Error handling via set -e and explicit checks
+
+      - name: Run test1 Script (Real Test Only)
+        id: run_script # Give the step an ID to reference its outcome
+        run: |
+          # Ensure the main script is executable
+          if [ ! -f Pr0xySh4rk.py ]; then
+             echo "::error::Script Pr0xySh4rk.py not found in repository root."
+             exit 1
+          fi
+          chmod +x Pr0xySh4rk.py
+
+          # Check if input file exists
+          if [ ! -f "${{ env.INPUT_FILE }}" ]; then
+             echo "::error::Input file '${{ env.INPUT_FILE }}' not found."
+             exit 1
+          fi
+
+          echo "Running Pr0xySh4rk with --test real..."
+          # Use python3 explicitly
+          # Outputting as plaintext (--no-base64). Remove if base64 is preferred.
+          python3 Pr0xySh4rk.py \
+            --input "${{ env.INPUT_FILE }}" \
+            --output "${{ env.OUTPUT_FILE }}" \
+            --test real \
+            --threads ${{ env.SCRIPT_THREADS }} \
+            --no-base64
+          # Script errors should cause non-zero exit code, failing this step
+
+        # Allow workflow to proceed to check status even if script fails
+        # We will explicitly fail the job in the next step if needed
+        continue-on-error: true
+
+      - name: Check Script Execution Status
+        if: steps.run_script.outcome != 'success'
+        run: |
+          echo "::error::Pr0xySh4rk script execution failed (exit code: ${{ steps.run_script.outputs.exit_code }}). Check the logs above."
+          exit 1 # Fail the entire job if the script failed
+
+      # Only proceed with commit if the script succeeded
+      - name: Commit and Push Changes
+        if: steps.run_script.outcome == 'success'
+        run: |
+          set -e # Exit on error
+
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          # Pull latest changes before adding files to minimize conflicts
+          echo "Pulling latest changes from origin/${{ github.ref_name }}..."
+          # Use --autostash to handle potential local changes cleanly during rebase
+          git pull --rebase --autostash origin ${{ github.ref_name }}
+
+          # Add only the specific output file generated by this workflow
+          git add "${{ env.OUTPUT_FILE }}"
+
+          # Check if there are changes to commit
+          # git diff --staged will exit with 0 if no changes, 1 if changes
+          if git diff --staged --quiet; then
+            echo "No changes detected in ${{ env.OUTPUT_FILE }}. Nothing to commit."
+          else
+            # Commit changes
+            COMMIT_DATE=$(date -u +'%Y-%m-%d %H:%M:%S %Z')
+            COMMIT_MSG="Update ${{ env.OUTPUT_FILE }} via GitHub Actions (${COMMIT_DATE})"
+            echo "Committing changes..."
+            git commit -m "$COMMIT_MSG"
+
+            # Push changes with retry logic
+            echo "Pushing changes to origin/${{ github.ref_name }}..."
+            RETRY_COUNT=5
+            RETRY_DELAY=15 # seconds
+            n=0
+            until [ $n -ge $RETRY_COUNT ]
+            do
+               # Push the current branch to the corresponding remote branch
+               git push origin ${{ github.ref_name }} && break # Exit loop if push succeeds
+               n=$((n+1))
+               echo "Push attempt $n failed. Retrying in $RETRY_DELAY seconds..."
+               sleep $RETRY_DELAY
+               # Optionally, try pulling again before retry in case of rapid remote changes
+               echo "Pulling again before retry..."
+               git pull --rebase --autostash origin ${{ github.ref_name }} || echo "Pull before retry failed, continuing push attempt..."
+            done
+
+            if [ $n -ge $RETRY_COUNT ]; then
+              echo "::error::Failed to push changes after $RETRY_COUNT attempts."
+              exit 1 # Fail the job if push fails repeatedly
+            fi
+            echo "Changes pushed successfully."
+          fi
