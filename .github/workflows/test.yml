@@ -48,9 +48,8 @@ jobs:
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install only necessary libraries used by the script
-          pip install requests urllib3
-          # Add any other direct dependencies of your script if needed
+          # Install dependencies using the requirements file
+          pip install -r requirements.txt
 
       - name: Download and Install Xray-core
         run: |
