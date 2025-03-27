@@ -699,8 +699,11 @@ def measure_xray_latency_http(proxy: str, timeout: int = 15) -> float:
     test_urls = [
         "http://detectportal.firefox.com/success.txt", # Lightweight HTTP
         "http://neverssl.com", # Plain HTTP, no redirects expected
-        "https://www.google.com/generate_204", # Google HTTPS 204
-        "https://www.cloudflare.com/cdn-cgi/trace", # Cloudflare HTTPS trace
+        "http://www.msftconnecttest.com/connecttest.txt", 
+        "http://cp.cloudflare.com", 
+        "http://httpbin.org/get",
+        "http://neverssl.com",
+        "http://example.com/",
     ]
     session = requests.Session()
     if proxy:
