@@ -22,7 +22,7 @@ jobs:
       INPUT_FILE: "url.txt"             # Input file with subscription URLs
       OUTPUT_FILE: "Pr0xySh4rk_SubBase64.txt" # Output file for tested/renamed configs
       SCRIPT_THREADS: 32                # Number of threads for the script
-      SPEEDTEST_AMOUNT: "5000kb"        # Speedtest data amount (e.g., 5000kb, 10mb)
+      SPEEDTEST_AMOUNT: "500kb"        # Speedtest data amount (e.g., 5000kb, 10mb)
       CLEAR_CACHE_BEFORE_RUN: "false"   # Set to "true" to clear script cache before running
       FORCE_FETCH_NO_CACHE: "false"   # Set to "true" to force fetch subs ignoring cache
       CONFIG_LIMIT_PER_PROTOCOL: 25     # <<<-- Number of configs to store per protocol
