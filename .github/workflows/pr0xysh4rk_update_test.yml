@@ -168,7 +168,9 @@ jobs:
             "--speedtest-amount" "${{ env.SPEEDTEST_AMOUNT }}"
             "--ip-info"
             "--xray-knife-insecure"
-            "--output-format" "text"
+            # --- FIX: Changed "text" to "base64" ---
+            "--output-format" "base64"
+            # --- End FIX ---
           )
 
           if [ "${{ env.CLEAR_CACHE_BEFORE_RUN }}" == "true" ]; then
