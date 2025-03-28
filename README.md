@@ -7,7 +7,7 @@
 ### Usage
 Simply import this url into your Hiddify/V2ray client applications!
 
-`https://raw.githubusercontent.com/HamoonSoleimani/Pr0xySh4rk/refs/heads/main/Pr0xySh4rk_SubsBase64.txt`
+`https://raw.githubusercontent.com/HamoonSoleimani/Pr0xySh4rk/refs/heads/main/Pr0xySh4rk_SubBase64.txt`
 
 
 
