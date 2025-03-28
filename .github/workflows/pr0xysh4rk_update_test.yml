@@ -27,17 +27,21 @@ jobs:
       FORCE_FETCH_NO_CACHE: "false"   # Set to "true" to force fetch subs ignoring cache
 
       # --- GeoIP Configuration ---
-      # ** Using the specific URL you provided **
       GEOIP_DB_URL: "https://github.com/P3TERX/GeoLite.mmdb/releases/download/2025.03.28/GeoLite2-Country.mmdb"
-      GEOIP_DB_FILENAME: "GeoLite2-Country.mmdb" # Expected filename after download
+      GEOIP_DB_FILENAME: "GeoLite2-Country.mmdb"
       # --- End GeoIP Configuration ---
 
       # --- End User Configuration ---
 
       # Internal - Path where xray-knife will be installed
       XRAY_KNIFE_INSTALL_DIR: "/usr/local/bin"
-      XRAY_KNIFE_EXECUTABLE_NAME: "xray-knife"
-      PYTHON_VERSION: '3.10' # Specify Python version
+      XRAY_KNIFE_EXECUTABLE_NAME: "xray-knife" # The name we expect the script to use
+      PYTHON_VERSION: '3.10'
+
+      # --- xray-knife Specific ---
+      XRAY_KNIFE_REPO: "lilendian0x00/xray-knife"
+      # ** IMPORTANT: Adjust this asset name pattern if the repo changes it in future releases **
+      XRAY_KNIFE_ASSET_PATTERN: "Xray-knife-linux-64.zip" # Matches the file in the release
 
     steps:
       - name: Checkout Repository
@@ -47,30 +51,79 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip' # Cache pip dependencies
+          cache: 'pip'
 
       - name: Install System Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends wget ca-certificates
+          # ** Added unzip and jq **
+          sudo apt-get install -y --no-install-recommends wget ca-certificates unzip jq
 
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install required and optional dependencies
-          # ** Corrected: Install geoip2 library, not geoip2-database **
           pip install requests urllib3 tqdm geoip2 python-dotenv
 
-      - name: Download and Install xray-knife (Latest)
+      # --- Updated xray-knife Installation ---
+      - name: Download and Install xray-knife (Latest Release)
         run: |
           set -e
-          XRAY_KNIFE_DOWNLOAD_URL="https://github.com/lilendian0x00/xray-knife/releases/latest/download/${{ env.XRAY_KNIFE_EXECUTABLE_NAME }}_linux_amd64"
           INSTALL_PATH="${{ env.XRAY_KNIFE_INSTALL_DIR }}/${{ env.XRAY_KNIFE_EXECUTABLE_NAME }}"
-          echo "Downloading xray-knife from ${XRAY_KNIFE_DOWNLOAD_URL}..."
-          wget --quiet --show-progress --progress=bar:force:noscroll -O xray-knife-download "${XRAY_KNIFE_DOWNLOAD_URL}"
-          echo "Installing xray-knife to ${INSTALL_PATH}..."
-          sudo mv xray-knife-download "${INSTALL_PATH}"
+          TEMP_DIR="xray_knife_temp"
+          ZIP_NAME="xray-knife-release.zip"
+
+          # 1. Get the latest release tag using GitHub API and jq
+          echo "Fetching latest release tag for ${{ env.XRAY_KNIFE_REPO }}..."
+          LATEST_TAG=$(curl -sL "https://api.github.com/repos/${{ env.XRAY_KNIFE_REPO }}/releases/latest" | jq -r ".tag_name")
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
+            echo "::error::Failed to fetch latest release tag. API response might have changed or repo not found."
+            exit 1
+          fi
+          echo "Latest tag: ${LATEST_TAG}"
+
+          # 2. Construct the download URL
+          # Use the pattern provided by the user's example URL structure
+          XRAY_KNIFE_DOWNLOAD_URL="https://github.com/${{ env.XRAY_KNIFE_REPO }}/releases/download/${LATEST_TAG}/${{ env.XRAY_KNIFE_ASSET_PATTERN }}"
+          echo "Constructed download URL: ${XRAY_KNIFE_DOWNLOAD_URL}"
+
+          # 3. Download the zip archive
+          echo "Downloading xray-knife release ${LATEST_TAG}..."
+          wget --quiet --show-progress --progress=bar:force:noscroll \
+               -O "${ZIP_NAME}" \
+               "${XRAY_KNIFE_DOWNLOAD_URL}"
+
+          # 4. Unzip the archive
+          echo "Unzipping ${ZIP_NAME}..."
+          mkdir -p "${TEMP_DIR}"
+          unzip -o "${ZIP_NAME}" -d "${TEMP_DIR}"
+
+          # 5. Find and install the executable
+          # ** Assuming the executable inside the zip is named 'xray-knife' **
+          # If the name inside the zip is different (e.g., 'Xray-knife'), adjust the path below
+          EXECUTABLE_IN_ZIP="${TEMP_DIR}/xray-knife" # Adjust if needed
+          if [ ! -f "${EXECUTABLE_IN_ZIP}" ]; then
+             echo "::error::Executable '${EXECUTABLE_IN_ZIP}' not found inside the unzipped archive. Contents:"
+             ls -lha "${TEMP_DIR}"
+             # Try finding variations (case-insensitive)
+             FOUND_EXEC=$(find "${TEMP_DIR}" -maxdepth 1 -type f -iname 'xray-knife*' | head -n 1)
+             if [ -n "$FOUND_EXEC" ]; then
+               echo "Found potential executable: ${FOUND_EXEC}"
+               EXECUTABLE_IN_ZIP=$FOUND_EXEC
+             else
+               exit 1 # Still couldn't find it
+             fi
+          fi
+          echo "Found executable: ${EXECUTABLE_IN_ZIP}"
+          echo "Installing executable to ${INSTALL_PATH}..."
+          sudo mv "${EXECUTABLE_IN_ZIP}" "${INSTALL_PATH}"
           sudo chmod +x "${INSTALL_PATH}"
+
+          # 6. Clean up
+          echo "Cleaning up..."
+          rm -f "${ZIP_NAME}"
+          rm -rf "${TEMP_DIR}"
+
+          # 7. Verify installation
           echo "Verifying xray-knife installation..."
           if ! command -v ${{ env.XRAY_KNIFE_EXECUTABLE_NAME }} &> /dev/null; then
             echo "::error::${{ env.XRAY_KNIFE_EXECUTABLE_NAME }} command not found in PATH after installation attempt."
@@ -78,8 +131,8 @@ jobs:
           fi
           echo "${{ env.XRAY_KNIFE_EXECUTABLE_NAME }} seems to be installed at $(command -v ${{ env.XRAY_KNIFE_EXECUTABLE_NAME }})"
           echo "xray-knife installed successfully."
+      # --- End of Updated xray-knife Installation ---
 
-      # Download GeoIP Database (Now always runs as URL is defined in env)
       - name: Download GeoIP Database
         run: |
           set -e
@@ -87,7 +140,6 @@ jobs:
           wget --quiet --show-progress --progress=bar:force:noscroll \
                 -O "${{ env.GEOIP_DB_FILENAME }}" \
                 "${{ env.GEOIP_DB_URL }}"
-          # Verify file exists
           if [ ! -f "${{ env.GEOIP_DB_FILENAME }}" ]; then
             echo "::error::GeoIP Database file '${{ env.GEOIP_DB_FILENAME }}' not found after download attempt from ${{ env.GEOIP_DB_URL }}."
             exit 1
@@ -97,7 +149,7 @@ jobs:
       - name: Run Pr0xySh4rk_test Script
         id: run_script
         run: |
-          set -e # Exit immediately if script fails
+          set -e
           if [ ! -f Pr0xySh4rk.py ]; then
              echo "::error::Script Pr0xySh4rk.py not found in repository root."
              exit 1
@@ -105,8 +157,7 @@ jobs:
           chmod +x Pr0xySh4rk.py
 
           if [ ! -f "${{ env.INPUT_FILE }}" ]; then
-             echo "::warning::Input file '${{ env.INPUT_FILE }}' not found. The script might fail or produce no output."
-             # Decide if this should be a fatal error: exit 1
+             echo "::warning::Input file '${{ env.INPUT_FILE }}' not found."
           fi
 
           SCRIPT_ARGS=(
@@ -118,8 +169,6 @@ jobs:
             "--ip-info"
             "--xray-knife-insecure"
             "--output-format" "text"
-            # Add --verbose for debugging if needed
-            # "--verbose"
           )
 
           if [ "${{ env.CLEAR_CACHE_BEFORE_RUN }}" == "true" ]; then
@@ -129,12 +178,9 @@ jobs:
             SCRIPT_ARGS+=("--no-cache")
           fi
 
-          # Add GeoIP DB argument using the downloaded file path
           if [ -f "${{ env.GEOIP_DB_FILENAME }}" ]; then
-             echo "GeoIP database file found, adding --geoip-db argument."
              SCRIPT_ARGS+=("--geoip-db" "${{ env.GEOIP_DB_FILENAME }}")
           else
-             # This shouldn't happen due to the check in the download step, but good failsafe
              echo "::error::GeoIP DB file '${{ env.GEOIP_DB_FILENAME }}' specified but not found!"
              exit 1
           fi
@@ -143,7 +189,8 @@ jobs:
           if [ -n "$XRAY_KNIFE_PATH" ]; then
             SCRIPT_ARGS+=("--xray-knife-path" "$XRAY_KNIFE_PATH")
           else
-            echo "::warning::Could not find xray-knife in PATH, script might fail if non-WG configs are present."
+            echo "::error::Could not find xray-knife in PATH after installation. Cannot run script."
+            exit 1
           fi
 
           echo "Running Pr0xySh4rk.py with arguments:"
@@ -152,7 +199,7 @@ jobs:
           python3 Pr0xySh4rk.py "${SCRIPT_ARGS[@]}"
 
       - name: Commit and Push Changes
-        if: success() # Run only if previous steps were successful
+        if: success()
         run: |
           set -e
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
