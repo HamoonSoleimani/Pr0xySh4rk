@@ -21,13 +21,11 @@ requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 # Test against these websites (HTTP/HTTPS)
 TEST_URLS = [
     "http://httpbin.org/get",
-    "https://www.cloudflare.com/",
-    "http://neverssl.com",
+    "http://www.cloudflare.com/cdn-cgi/trace",
     "http://stu.iust.ac.ir/index.rose",
-    "https://api.ipify.org/?format=json"
 ]
 # Gather the best N working configs for each protocol
-BEST_CONFIGS_LIMIT = 75
+BEST_CONFIGS_LIMIT = 50
 # Timeouts (in seconds) - Increased for better reliability
 TCP_TIMEOUT = 5
 HTTP_TIMEOUT = 8
