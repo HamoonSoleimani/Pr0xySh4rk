@@ -1,6 +1,6 @@
 # .github/workflows/pr0xysh4rk_update.yml
 
-name: Pr0xySh4rk_test Proxy Update
+name: Pr0xySh4rk Proxy Update
 
 on:
   schedule:
@@ -19,12 +19,13 @@ jobs:
 
     env:
       # --- User Configuration ---
-      INPUT_FILE: "subs1.txt"             # Input file with subscription URLs
-      OUTPUT_FILE: "SubscriptionLinks_test.txt" # Output file for tested/renamed configs
+      INPUT_FILE: "url.txt"             # Input file with subscription URLs
+      OUTPUT_FILE: "SubscriptionLinks.txt" # Output file for tested/renamed configs
       SCRIPT_THREADS: 32                # Number of threads for the script
       SPEEDTEST_AMOUNT: "5000kb"        # Speedtest data amount (e.g., 5000kb, 10mb)
       CLEAR_CACHE_BEFORE_RUN: "false"   # Set to "true" to clear script cache before running
       FORCE_FETCH_NO_CACHE: "false"   # Set to "true" to force fetch subs ignoring cache
+      CONFIG_LIMIT_PER_PROTOCOL: 25     # <<<-- Number of configs to store per protocol
 
       # --- GeoIP Configuration ---
       GEOIP_DB_URL: "https://github.com/P3TERX/GeoLite.mmdb/releases/download/2025.03.28/GeoLite2-Country.mmdb"
@@ -146,7 +147,7 @@ jobs:
           fi
           echo "GeoIP Database downloaded successfully to ${{ env.GEOIP_DB_FILENAME }}."
 
-      - name: Run Pr0xySh4rk_test Script
+      - name: Run Pr0xySh4rk Script
         id: run_script
         run: |
           set -e
@@ -168,9 +169,8 @@ jobs:
             "--speedtest-amount" "${{ env.SPEEDTEST_AMOUNT }}"
             "--ip-info"
             "--xray-knife-insecure"
-            # --- FIX: Changed "text" to "base64" ---
             "--output-format" "base64"
-            # --- End FIX ---
+            "--limit" "${{ env.CONFIG_LIMIT_PER_PROTOCOL }}" # <<<-- Added limit argument using env variable
           )
 
           if [ "${{ env.CLEAR_CACHE_BEFORE_RUN }}" == "true" ]; then
