@@ -1,0 +1,229 @@
+# .github/workflows/pr0xysh4rk_update.yml
+
+name: Pr0xySh4rk_test Proxy Update
+
+on:
+  schedule:
+    # Runs every day at 03:00 UTC (adjust as needed)
+    # Consider the runtime and GitHub Actions usage limits.
+    - cron: '0 3 * * *'
+  workflow_dispatch:  # Allows manual triggering from the Actions tab
+
+# Set permissions for the GITHUB_TOKEN to allow pushing commits
+permissions:
+  contents: write
+
+jobs:
+  update-proxies:
+    runs-on: ubuntu-latest
+    # Increase the timeout significantly due to potentially long testing times
+    timeout-minutes: 480 # 8 hours
+
+    env:
+      # --- User Configuration ---
+      INPUT_FILE: "subs1.txt"             # Input file with subscription URLs
+      OUTPUT_FILE: "SubscriptionLinks_test.txt" # Output file for tested/renamed configs
+      SCRIPT_THREADS: 32                # Number of threads for the script
+      SPEEDTEST_AMOUNT: "5000kb"        # Speedtest data amount (e.g., 5000kb, 10mb)
+      # Set to "true" to clear cache before running, "false" otherwise
+      CLEAR_CACHE_BEFORE_RUN: "false"
+      # Set to "true" to force fetch subs ignoring cache, "false" otherwise
+      FORCE_FETCH_NO_CACHE: "false"
+      # GeoIP Database URL (Optional - uncomment and set URL if you have one)
+      # GEOIP_DB_URL: "YOUR_GEOLITE2-COUNTRY.mmdb_DOWNLOAD_URL"
+      # GEOIP_DB_FILENAME: "GeoLite2-Country.mmdb" # Expected filename after download
+      # --- End User Configuration ---
+
+      # Internal - Path where xray-knife will be installed
+      XRAY_KNIFE_INSTALL_DIR: "/usr/local/bin"
+      XRAY_KNIFE_EXECUTABLE_NAME: "xray-knife"
+      # Specify Python version
+      PYTHON_VERSION: '3.10'
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip' # Cache pip dependencies
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update -qq
+          # wget for downloading, unzip for extracting (if needed), ca-certificates for TLS
+          sudo apt-get install -y --no-install-recommends wget ca-certificates
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install required and optional dependencies mentioned in the script
+          # Optional: Add specific versions if needed (e.g., requests==2.31.0)
+          pip install requests urllib3 tqdm geoip2-database python-dotenv
+
+      - name: Download and Install xray-knife (Latest)
+        run: |
+          set -e # Exit immediately on error
+          XRAY_KNIFE_DOWNLOAD_URL="https://github.com/lilendian0x00/xray-knife/releases/latest/download/${{ env.XRAY_KNIFE_EXECUTABLE_NAME }}_linux_amd64"
+          INSTALL_PATH="${{ env.XRAY_KNIFE_INSTALL_DIR }}/${{ env.XRAY_KNIFE_EXECUTABLE_NAME }}"
+
+          echo "Downloading xray-knife from ${XRAY_KNIFE_DOWNLOAD_URL}..."
+          wget --quiet --show-progress --progress=bar:force:noscroll \
+               -O xray-knife-download \
+               "${XRAY_KNIFE_DOWNLOAD_URL}"
+
+          echo "Installing xray-knife to ${INSTALL_PATH}..."
+          sudo mv xray-knife-download "${INSTALL_PATH}"
+          sudo chmod +x "${INSTALL_PATH}"
+
+          echo "Verifying xray-knife installation..."
+          if ! command -v ${{ env.XRAY_KNIFE_EXECUTABLE_NAME }} &> /dev/null; then
+            echo "::error::${{ env.XRAY_KNIFE_EXECUTABLE_NAME }} command not found in PATH after installation attempt."
+            exit 1
+          fi
+          # xray-knife doesn't have a simple version command, check existence is the main goal
+          echo "${{ env.XRAY_KNIFE_EXECUTABLE_NAME }} seems to be installed at $(command -v ${{ env.XRAY_KNIFE_EXECUTABLE_NAME }})"
+          echo "xray-knife installed successfully."
+
+      # Optional Step: Download GeoIP Database if URL is provided
+      - name: Download GeoIP Database (Optional)
+        if: env.GEOIP_DB_URL != ''
+        run: |
+          set -e
+          echo "Downloading GeoIP Database from ${{ env.GEOIP_DB_URL }}..."
+          wget --quiet --show-progress --progress=bar:force:noscroll \
+                -O "${{ env.GEOIP_DB_FILENAME }}" \
+                "${{ env.GEOIP_DB_URL }}"
+          echo "GeoIP Database downloaded to ${{ env.GEOIP_DB_FILENAME }}."
+          # Verify file exists
+          if [ ! -f "${{ env.GEOIP_DB_FILENAME }}" ]; then
+            echo "::error::GeoIP Database file '${{ env.GEOIP_DB_FILENAME }}' not found after download."
+            exit 1
+          fi
+
+      - name: Run Pr0xySh4rk_test Script
+        id: run_script
+        run: |
+          # Ensure the main script is executable
+          if [ ! -f Pr0xySh4rk.py ]; then
+             echo "::error::Script Pr0xySh4rk.py not found in repository root."
+             exit 1
+          fi
+          chmod +x Pr0xySh4rk.py
+
+          # Check if input file exists
+          if [ ! -f "${{ env.INPUT_FILE }}" ]; then
+             echo "::warning::Input file '${{ env.INPUT_FILE }}' not found. The script might fail or produce no output."
+             # Decide if this should be a fatal error: exit 1
+          fi
+
+          # Construct arguments dynamically
+          SCRIPT_ARGS=(
+            "--input" "${{ env.INPUT_FILE }}"
+            "--output" "${{ env.OUTPUT_FILE }}"
+            "--threads" "${{ env.SCRIPT_THREADS }}"
+            "--speedtest" # -p flag
+            "--speedtest-amount" "${{ env.SPEEDTEST_AMOUNT }}" # -a flag
+            "--ip-info" # --rip flag
+            "--xray-knife-insecure"
+            "--output-format" "text" # Save as plaintext, not base64
+            # Add --verbose for debugging if needed
+            # "--verbose"
+          )
+
+          # Add cache related flags if set in env
+          if [ "${{ env.CLEAR_CACHE_BEFORE_RUN }}" == "true" ]; then
+            SCRIPT_ARGS+=("--clear-cache")
+          fi
+          if [ "${{ env.FORCE_FETCH_NO_CACHE }}" == "true" ]; then
+            SCRIPT_ARGS+=("--no-cache")
+          fi
+
+          # Add GeoIP DB argument if the file exists (downloaded or pre-existing)
+          if [ -f "${{ env.GEOIP_DB_FILENAME }}" ]; then
+             echo "GeoIP database file found, adding --geoip-db argument."
+             SCRIPT_ARGS+=("--geoip-db" "${{ env.GEOIP_DB_FILENAME }}")
+          elif [ "${{ env.GEOIP_DB_URL }}" != "" ]; then
+             echo "::warning::GeoIP DB URL was set, but file '${{ env.GEOIP_DB_FILENAME }}' not found. Skipping --geoip-db."
+          fi
+
+          # Add path to xray-knife explicitly (belt and suspenders)
+          XRAY_KNIFE_PATH=$(command -v ${{ env.XRAY_KNIFE_EXECUTABLE_NAME }})
+          if [ -n "$XRAY_KNIFE_PATH" ]; then
+            SCRIPT_ARGS+=("--xray-knife-path" "$XRAY_KNIFE_PATH")
+          else
+            echo "::warning::Could not find xray-knife in PATH, script might fail if non-WG configs are present."
+          fi
+
+          echo "Running Pr0xySh4rk.py with arguments:"
+          # Print arguments for debugging (masking sensitive info if any in future)
+          printf "  %s\n" "${SCRIPT_ARGS[@]}"
+
+          # Execute the script
+          python3 Pr0xySh4rk.py "${SCRIPT_ARGS[@]}"
+
+      - name: Commit and Push Changes
+        # Run only if the script step was successful
+        if: steps.run_script.outcome == 'success'
+        run: |
+          set -e # Exit on error
+
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          # Check if the output file exists before proceeding
+          if [ ! -f "${{ env.OUTPUT_FILE }}" ]; then
+            echo "Output file '${{ env.OUTPUT_FILE }}' not found after script execution. Nothing to commit."
+            exit 0 # Exit successfully, no changes to commit
+          fi
+
+          # Pull latest changes before adding files to minimize conflicts
+          # Use the branch name from the event context
+          BRANCH_NAME="${{ github.ref_name }}"
+          echo "Pulling latest changes from origin/${BRANCH_NAME}..."
+          git pull --rebase --autostash origin "${BRANCH_NAME}" || {
+            echo "::warning::Pull/rebase failed. Potential conflicts or remote changes. Proceeding with caution."
+            # You might want to fail here depending on your strategy: exit 1
+          }
+
+          # Add only the specific output file generated by this workflow
+          git add "${{ env.OUTPUT_FILE }}"
+
+          # Optional: Add other files if needed (e.g., CSV/JSON reports)
+          # if [ -f "detailed_results.csv" ]; then git add detailed_results.csv; fi
+          # if [ -f "detailed_results.json" ]; then git add detailed_results.json; fi
+
+          # Check if there are changes to commit in the specified file(s)
+          if git diff --staged --quiet; then
+            echo "No changes detected in ${{ env.OUTPUT_FILE }}. Nothing to commit."
+          else
+            # Commit changes
+            COMMIT_DATE=$(date -u +'%Y-%m-%d %H:%M:%S %Z')
+            COMMIT_MSG="Update ${{ env.OUTPUT_FILE }} via Pr0xySh4rk (${COMMIT_DATE})"
+            echo "Committing changes..."
+            git commit -m "$COMMIT_MSG"
+
+            # Push changes with retry logic
+            echo "Pushing changes to origin/${BRANCH_NAME}..."
+            RETRY_COUNT=5
+            RETRY_DELAY=20 # seconds
+            n=0
+            until [ $n -ge $RETRY_COUNT ]
+            do
+               git push origin "${BRANCH_NAME}" && break # Push the current branch
+               n=$((n+1))
+               echo "Push attempt $n failed. Retrying in $RETRY_DELAY seconds..."
+               sleep $RETRY_DELAY
+               # Optionally, try pulling again before retry
+               echo "Pulling again before retry..."
+               git pull --rebase --autostash origin "${BRANCH_NAME}" || echo "Pull before retry failed, continuing push attempt..."
+            done
+
+            if [ $n -ge $RETRY_COUNT ]; then
+              echo "::error::Failed to push changes after $RETRY_COUNT attempts."
+              exit 1
+            fi
+            echo "Changes pushed successfully."
+          fi
