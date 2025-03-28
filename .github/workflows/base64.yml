@@ -26,7 +26,7 @@ jobs:
 
       - name: Run Pr0xySh4rk_xray Script
         run: |
-          python Pr0xySh4rk_xray.py --input subs.txt --output Pr0xySh4rkBase64.txt -r 5 --test tcp+http
+          python Pr0xySh4rk_xray.py --input url.txt --output Pr0xySh4rkBase64.txt -r 5 --test tcp+http
       
                 
       - name: Commit and Push Changes
