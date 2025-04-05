@@ -1,6 +1,6 @@
 # .github/workflows/pr0xysh4rk_update.yml
 
-name: Pr0xySh4rk Proxy Update
+name: Pr0xySh4rk Proxy Update (No GeoIP)
 
 on:
   schedule:
@@ -25,13 +25,7 @@ jobs:
       SPEEDTEST_AMOUNT: "500kb"        # Speedtest data amount (e.g., 5000kb, 10mb)
       CLEAR_CACHE_BEFORE_RUN: "false"   # Set to "true" to clear script cache before running
       FORCE_FETCH_NO_CACHE: "false"   # Set to "true" to force fetch subs ignoring cache
-      CONFIG_LIMIT_PER_PROTOCOL: 25     # <<<-- Number of configs to store per protocol
-
-      # --- GeoIP Configuration ---
-      GEOIP_DB_URL: "https://github.com/P3TERX/GeoLite.mmdb/releases/download/2025.03.28/GeoLite2-Country.mmdb"
-      GEOIP_DB_FILENAME: "GeoLite2-Country.mmdb"
-      # --- End GeoIP Configuration ---
-
+      CONFIG_LIMIT_PER_PROTOCOL: 45     # <<<-- Number of configs to store per protocol
       # --- End User Configuration ---
 
       # Internal - Path where xray-knife will be installed
@@ -60,10 +54,11 @@ jobs:
           # ** Added unzip and jq **
           sudo apt-get install -y --no-install-recommends wget ca-certificates unzip jq
 
-      - name: Install Python Dependencies
+      - name: Install Python Dependencies (No GeoIP)
         run: |
           python -m pip install --upgrade pip
-          pip install requests urllib3 tqdm geoip2 python-dotenv
+          # Removed geoip2 from this list
+          pip install requests urllib3 tqdm python-dotenv
 
       # --- Updated xray-knife Installation ---
       - name: Download and Install xray-knife (Latest Release)
@@ -83,7 +78,6 @@ jobs:
           echo "Latest tag: ${LATEST_TAG}"
 
           # 2. Construct the download URL
-          # Use the pattern provided by the user's example URL structure
           XRAY_KNIFE_DOWNLOAD_URL="https://github.com/${{ env.XRAY_KNIFE_REPO }}/releases/download/${LATEST_TAG}/${{ env.XRAY_KNIFE_ASSET_PATTERN }}"
           echo "Constructed download URL: ${XRAY_KNIFE_DOWNLOAD_URL}"
 
@@ -99,13 +93,10 @@ jobs:
           unzip -o "${ZIP_NAME}" -d "${TEMP_DIR}"
 
           # 5. Find and install the executable
-          # ** Assuming the executable inside the zip is named 'xray-knife' **
-          # If the name inside the zip is different (e.g., 'Xray-knife'), adjust the path below
           EXECUTABLE_IN_ZIP="${TEMP_DIR}/xray-knife" # Adjust if needed
           if [ ! -f "${EXECUTABLE_IN_ZIP}" ]; then
              echo "::error::Executable '${EXECUTABLE_IN_ZIP}' not found inside the unzipped archive. Contents:"
              ls -lha "${TEMP_DIR}"
-             # Try finding variations (case-insensitive)
              FOUND_EXEC=$(find "${TEMP_DIR}" -maxdepth 1 -type f -iname 'xray-knife*' | head -n 1)
              if [ -n "$FOUND_EXEC" ]; then
                echo "Found potential executable: ${FOUND_EXEC}"
@@ -134,20 +125,9 @@ jobs:
           echo "xray-knife installed successfully."
       # --- End of Updated xray-knife Installation ---
 
-      - name: Download GeoIP Database
-        run: |
-          set -e
-          echo "Downloading GeoIP Database from ${{ env.GEOIP_DB_URL }}..."
-          wget --quiet --show-progress --progress=bar:force:noscroll \
-                -O "${{ env.GEOIP_DB_FILENAME }}" \
-                "${{ env.GEOIP_DB_URL }}"
-          if [ ! -f "${{ env.GEOIP_DB_FILENAME }}" ]; then
-            echo "::error::GeoIP Database file '${{ env.GEOIP_DB_FILENAME }}' not found after download attempt from ${{ env.GEOIP_DB_URL }}."
-            exit 1
-          fi
-          echo "GeoIP Database downloaded successfully to ${{ env.GEOIP_DB_FILENAME }}."
+      # <<<--- GeoIP Download Step Removed --->>>
 
-      - name: Run Pr0xySh4rk Script
+      - name: Run Pr0xySh4rk Script (No GeoIP)
         id: run_script
         run: |
           set -e
@@ -161,16 +141,17 @@ jobs:
              echo "::warning::Input file '${{ env.INPUT_FILE }}' not found."
           fi
 
+          # Removed --ip-info argument
           SCRIPT_ARGS=(
             "--input" "${{ env.INPUT_FILE }}"
             "--output" "${{ env.OUTPUT_FILE }}"
             "--threads" "${{ env.SCRIPT_THREADS }}"
             "--speedtest"
             "--speedtest-amount" "${{ env.SPEEDTEST_AMOUNT }}"
-            "--ip-info"
+            # "--ip-info" # <-- Removed this line
             "--xray-knife-insecure"
             "--output-format" "base64"
-            "--limit" "${{ env.CONFIG_LIMIT_PER_PROTOCOL }}" # <<<-- Added limit argument using env variable
+            "--limit" "${{ env.CONFIG_LIMIT_PER_PROTOCOL }}"
           )
 
           if [ "${{ env.CLEAR_CACHE_BEFORE_RUN }}" == "true" ]; then
@@ -180,12 +161,7 @@ jobs:
             SCRIPT_ARGS+=("--no-cache")
           fi
 
-          if [ -f "${{ env.GEOIP_DB_FILENAME }}" ]; then
-             SCRIPT_ARGS+=("--geoip-db" "${{ env.GEOIP_DB_FILENAME }}")
-          else
-             echo "::error::GeoIP DB file '${{ env.GEOIP_DB_FILENAME }}' specified but not found!"
-             exit 1
-          fi
+          # <<<--- Removed the block that added --geoip-db --->>>
 
           XRAY_KNIFE_PATH=$(command -v ${{ env.XRAY_KNIFE_EXECUTABLE_NAME }})
           if [ -n "$XRAY_KNIFE_PATH" ]; then
@@ -195,7 +171,7 @@ jobs:
             exit 1
           fi
 
-          echo "Running Pr0xySh4rk.py with arguments:"
+          echo "Running Pr0xySh4rk.py with arguments (No GeoIP):"
           printf "  %s\n" "${SCRIPT_ARGS[@]}"
 
           python3 Pr0xySh4rk.py "${SCRIPT_ARGS[@]}"
