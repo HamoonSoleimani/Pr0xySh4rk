@@ -535,7 +535,8 @@ async def _test_wg_udp_async(result_obj: TestResult, args: argparse.Namespace) -
     except OSError as e: result_obj.status="failed"; result_obj.reason=f"OS error: {e.strerror}"
     except Exception as e: result_obj.status="broken"; result_obj.reason=f"UDP test error: {e}"
     finally:
-        if transport: try: transport.close() catch Exception: pass
+        if transport: 
+        try: transport.close() catch Exception: pass
 
     # Score Calculation
     if result_obj.status == "passed":
@@ -741,7 +742,8 @@ def test_config_with_xray_knife(result_obj: TestResult, xray_knife_path: str, ar
 
     # --- Parse Initial Test Output ---
     full = out + "\n" + err
-    if m := REAL_DELAY_PATTERN.search(full): try: result_obj.real_delay_ms = float(m.group(1)) except ValueError: pass
+    if m := REAL_DELAY_PATTERN.search(full): 
+    try: result_obj.real_delay_ms = float(m.group(1)) except ValueError: pass
     def parse_sp(match): # Speed parsing helper
         if not match: return 0.0
         try: v=float(match.group(1)); u=match.group(2).lower(); return v/1000.0 if u=='k' else v if u=='m' else v/1000000.0
