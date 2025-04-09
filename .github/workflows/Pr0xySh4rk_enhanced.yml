@@ -1,0 +1,321 @@
+# .github/workflows/pr0xysh4rk_update.yml
+
+name: Pr0xySh4rk Enhanced Proxy Update
+
+on:
+  schedule:
+    # Runs every day at 03:00 UTC (adjust cron schedule as needed)
+    # Example: '0 */6 * * *' runs every 6 hours
+    - cron: '0 3 * * *'
+  workflow_dispatch:  # Allows manual triggering from the Actions tab
+
+# Set permissions for the GITHUB_TOKEN to allow pushing commits
+permissions:
+  contents: write # Required to push the updated proxy list file
+
+jobs:
+  update-proxies:
+    runs-on: ubuntu-latest # Use the standard Linux runner
+    timeout-minutes: 540 # Extended timeout (9 hours) for potentially long tests
+
+    env:
+      # --- User Configuration ---
+      PYTHON_VERSION: '3.10'                # Python version to use
+      INPUT_FILE: "url.txt"                 # Input file with subscription URLs (in repo root)
+      OUTPUT_FILE: "Pr0xySh4rk_enhanced.txt" # Output file for tested/renamed configs
+      OUTPUT_CSV_FILE: "Pr0xySh4rk_Detailed.csv" # Optional: Detailed CSV results (leave blank "" to disable)
+      OUTPUT_JSON_FILE: "" # Optional: Detailed JSON results (leave blank "" to disable)
+      SCRIPT_THREADS: 32                    # Number of concurrent threads for the script
+      SPEEDTEST_AMOUNT: "1000kb"            # Speedtest data amount (e.g., 500kb, 5000kb, 10mb) - use 'kb' or 'mb' suffix
+      CONFIG_LIMIT_PER_PROTOCOL: 50         # Max number of configs to store per protocol type
+      SCRIPT_NAME_PREFIX: "Pr0xySh4rk"      # Prefix for renamed output configs
+      ENABLE_SPEEDTEST: "true"             # Set to "true" to enable speed testing, "false" to disable
+      CLEAR_CACHE_BEFORE_RUN: "false"       # Set to "true" to clear script cache (.proxy_cache) before running
+      FORCE_FETCH_NO_CACHE: "false"         # Set to "true" to force fetching subs ignoring local cache TTL
+      XRAY_KNIFE_INSECURE: "true"           # Set to "true" to allow insecure TLS for xray-knife (-e flag)
+      SHOW_PROTOCOL_STATS: "true"           # Set to "true" to show protocol summary stats at the end
+      VERBOSE_LEVEL: "1"                    # Verbosity level for the script: 0 (quiet), 1 (normal), 2 (detailed sub-checks)
+      # --- End User Configuration ---
+
+      # --- Internal Configuration ---
+      SCRIPT_FILENAME: "Pr0xySh4rk_new.py"      # The name of your python script file
+      XRAY_KNIFE_INSTALL_DIR: "/usr/local/bin" # Standard location likely in PATH
+      XRAY_KNIFE_EXECUTABLE_NAME: "xray-knife" # The name the script expects/uses
+      XRAY_KNIFE_REPO: "lilendian0x00/xray-knife" # Repository for xray-knife releases
+      # ** IMPORTANT: Adjust this asset pattern if the repo changes it **
+      # This pattern should match the specific Linux 64-bit zip file in the release assets
+      XRAY_KNIFE_ASSET_PATTERN: "Xray-knife-linux-64.zip"
+      # --- End Internal Configuration ---
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch depth 0 is needed for git pull/push operations later
+          fetch-depth: 0
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip' # Cache pip dependencies
+
+      - name: Install System Dependencies
+        run: |
+          echo "Updating package lists and installing system dependencies..."
+          sudo apt-get update -qq
+          # Essential tools: wget for download, ca-certificates for HTTPS, unzip, jq for JSON parsing (GitHub API)
+          sudo apt-get install -y --no-install-recommends wget ca-certificates unzip jq
+          echo "System dependencies installed."
+
+      - name: Install Python Dependencies
+        run: |
+          echo "Upgrading pip and installing Python requirements..."
+          python -m pip install --upgrade pip
+          # Install packages required by the enhanced script (NO geoip2 as requested)
+          # tqdm is optional but recommended for progress bars
+          pip install requests urllib3 python-dotenv tqdm ipaddress
+          echo "Python requirements installed."
+          pip list # List installed packages for debugging
+
+      # --- Download and Install Latest xray-knife ---
+      - name: Download and Install xray-knife (Latest Release)
+        id: install_xray_knife
+        run: |
+          set -e # Exit immediately if a command exits with a non-zero status.
+          INSTALL_PATH="${{ env.XRAY_KNIFE_INSTALL_DIR }}/${{ env.XRAY_KNIFE_EXECUTABLE_NAME }}"
+          TEMP_DIR="xray_knife_temp_install"
+          ZIP_NAME="xray-knife-release.zip"
+          API_URL="https://api.github.com/repos/${{ env.XRAY_KNIFE_REPO }}/releases/latest"
+
+          # 1. Get the latest release information using GitHub API and jq
+          echo "Fetching latest release information from ${API_URL}..."
+          RELEASE_INFO=$(curl -sL "${API_URL}")
+          # Extract the download URL for the specific asset pattern
+          ASSET_URL=$(echo "${RELEASE_INFO}" | jq -r --arg PATTERN "${{ env.XRAY_KNIFE_ASSET_PATTERN }}" '.assets[] | select(.name | test($PATTERN)) | .browser_download_url')
+          LATEST_TAG=$(echo "${RELEASE_INFO}" | jq -r ".tag_name")
+
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
+            echo "::error::Failed to fetch latest release tag. API response might have changed or repo not found."
+            echo "API Response: ${RELEASE_INFO}"
+            exit 1
+          fi
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" == "null" ]; then
+            echo "::error::Failed to find asset URL matching pattern '${{ env.XRAY_KNIFE_ASSET_PATTERN }}' in release ${LATEST_TAG}."
+            echo "Available assets:"
+            echo "${RELEASE_INFO}" | jq -r '.assets[] | .name'
+            exit 1
+          fi
+          echo "Latest tag: ${LATEST_TAG}"
+          echo "Found asset download URL: ${ASSET_URL}"
+
+          # 2. Download the zip archive
+          echo "Downloading xray-knife release ${LATEST_TAG} (${{ env.XRAY_KNIFE_ASSET_PATTERN }})..."
+          wget --quiet --show-progress --progress=bar:force:noscroll \
+               -O "${ZIP_NAME}" \
+               "${ASSET_URL}"
+
+          # 3. Create temporary directory and unzip the archive
+          echo "Unzipping ${ZIP_NAME}..."
+          mkdir -p "${TEMP_DIR}"
+          unzip -o "${ZIP_NAME}" -d "${TEMP_DIR}" # Overwrite existing files if any
+
+          # 4. Find and install the executable
+          # Assume the executable name inside the zip matches XRAY_KNIFE_EXECUTABLE_NAME
+          EXECUTABLE_IN_ZIP="${TEMP_DIR}/${{ env.XRAY_KNIFE_EXECUTABLE_NAME }}"
+          if [ ! -f "${EXECUTABLE_IN_ZIP}" ]; then
+             # Fallback: Try finding any file named 'xray-knife*' if the exact name isn't found
+             echo "::warning::Executable '${EXECUTABLE_IN_ZIP}' not found directly. Searching within ${TEMP_DIR}..."
+             FOUND_EXEC=$(find "${TEMP_DIR}" -maxdepth 1 -type f -iname 'xray-knife*' | head -n 1)
+             if [ -n "$FOUND_EXEC" ]; then
+               echo "Found potential executable: ${FOUND_EXEC}"
+               EXECUTABLE_IN_ZIP=$FOUND_EXEC
+             else
+               echo "::error::Executable matching 'xray-knife*' not found inside the unzipped archive. Contents:"
+               ls -lha "${TEMP_DIR}"
+               exit 1 # Critical error if executable cannot be located
+             fi
+          fi
+          echo "Found executable for installation: ${EXECUTABLE_IN_ZIP}"
+
+          # 5. Install to the target directory (requires sudo) and make executable
+          echo "Installing executable to ${INSTALL_PATH}..."
+          sudo mv "${EXECUTABLE_IN_ZIP}" "${INSTALL_PATH}"
+          sudo chmod +x "${INSTALL_PATH}"
+
+          # 6. Clean up downloaded file and temporary directory
+          echo "Cleaning up temporary files..."
+          rm -f "${ZIP_NAME}"
+          rm -rf "${TEMP_DIR}"
+
+          # 7. Verify installation by checking if the command is now available in PATH
+          echo "Verifying xray-knife installation path..."
+          VERIFIED_PATH=$(command -v ${{ env.XRAY_KNIFE_EXECUTABLE_NAME }})
+          if [ -z "$VERIFIED_PATH" ]; then
+            echo "::error::'${{ env.XRAY_KNIFE_EXECUTABLE_NAME }}' command not found in PATH after installation attempt."
+            echo "Current PATH: $PATH"
+            echo "Expected location: ${INSTALL_PATH}"
+            exit 1
+          fi
+          echo "${{ env.XRAY_KNIFE_EXECUTABLE_NAME }} is available at: ${VERIFIED_PATH}"
+          # Set the verified path as an output for the next step
+          echo "verified_path=${VERIFIED_PATH}" >> $GITHUB_OUTPUT
+          echo "xray-knife installed successfully."
+      # --- End of xray-knife Installation ---
+
+      - name: Run Pr0xySh4rk Script
+        id: run_script
+        run: |
+          set -e # Exit on error
+          echo "Preparing to run Python script: ${{ env.SCRIPT_FILENAME }}"
+
+          # Verify script exists
+          if [ ! -f "${{ env.SCRIPT_FILENAME }}" ]; then
+             echo "::error::Script ${{ env.SCRIPT_FILENAME }} not found in repository root."
+             exit 1
+          fi
+          # Make script executable (though usually not needed for python3 execution)
+          chmod +x ${{ env.SCRIPT_FILENAME }}
+
+          # Verify input file exists (optional, script might handle it)
+          if [ ! -f "${{ env.INPUT_FILE }}" ]; then
+             echo "::warning::Input file '${{ env.INPUT_FILE }}' not found. Script might fail or process no URLs."
+          fi
+
+          # Get the verified xray-knife path from the previous step's output
+          XRAY_KNIFE_VERIFIED_PATH="${{ steps.install_xray_knife.outputs.verified_path }}"
+          if [ -z "$XRAY_KNIFE_VERIFIED_PATH" ]; then
+             echo "::error::Verified path for xray-knife was not set by the installation step."
+             exit 1
+          fi
+          echo "Using xray-knife path: ${XRAY_KNIFE_VERIFIED_PATH}"
+
+          # Construct script arguments array for clarity and safety
+          declare -a SCRIPT_ARGS=(
+            "--input" "${{ env.INPUT_FILE }}"
+            "--output" "${{ env.OUTPUT_FILE }}"
+            "--threads" "${{ env.SCRIPT_THREADS }}"
+            "--limit" "${{ env.CONFIG_LIMIT_PER_PROTOCOL }}"
+            "--name-prefix" "${{ env.SCRIPT_NAME_PREFIX }}"
+            "--output-format" "base64" # Usually base64 for subscription lists
+            "--xray-knife-path" "$XRAY_KNIFE_VERIFIED_PATH"
+          )
+
+          # Conditionally add arguments based on env variables
+          if [ "${{ env.ENABLE_SPEEDTEST }}" == "true" ]; then
+            SCRIPT_ARGS+=("--speedtest")
+            SCRIPT_ARGS+=("--speedtest-amount" "${{ env.SPEEDTEST_AMOUNT }}")
+          fi
+          if [ "${{ env.XRAY_KNIFE_INSECURE }}" == "true" ]; then
+            SCRIPT_ARGS+=("--xray-knife-insecure")
+          fi
+          if [ "${{ env.CLEAR_CACHE_BEFORE_RUN }}" == "true" ]; then
+            SCRIPT_ARGS+=("--clear-cache")
+          fi
+          if [ "${{ env.FORCE_FETCH_NO_CACHE }}" == "true" ]; then
+            SCRIPT_ARGS+=("--no-cache")
+          fi
+          if [ -n "${{ env.OUTPUT_CSV_FILE }}" ]; then
+            SCRIPT_ARGS+=("--output-csv" "${{ env.OUTPUT_CSV_FILE }}")
+          fi
+          if [ -n "${{ env.OUTPUT_JSON_FILE }}" ]; then
+            SCRIPT_ARGS+=("--output-json" "${{ env.OUTPUT_JSON_FILE }}")
+          fi
+          if [ "${{ env.SHOW_PROTOCOL_STATS }}" == "true" ]; then
+            SCRIPT_ARGS+=("--protocol-stats")
+          fi
+          if [ "${{ env.VERBOSE_LEVEL }}" -gt 0 ]; then
+            # Add '-v' flag based on level (e.g., level 1 -> -v, level 2 -> -vv)
+            verbose_flags=$(printf -- '-v%.0s' $(seq 1 ${{ env.VERBOSE_LEVEL }}))
+            SCRIPT_ARGS+=("$verbose_flags")
+          fi
+
+          # Print the command for debugging
+          echo "Running Python script with arguments:"
+          printf "  python3 ${{ env.SCRIPT_FILENAME }}"; for arg in "${SCRIPT_ARGS[@]}"; do printf " '%s'" "$arg"; done; echo
+
+          # Execute the script
+          python3 ${{ env.SCRIPT_FILENAME }} "${SCRIPT_ARGS[@]}"
+
+          echo "Python script finished."
+
+      - name: Commit and Push Changes
+        if: success() # Only run if the previous steps were successful
+        run: |
+          set -e
+          echo "Configuring git user..."
+          # Use the standard GitHub Actions bot user
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          # Check if the main output file exists
+          if [ ! -f "${{ env.OUTPUT_FILE }}" ]; then
+            echo "Main output file '${{ env.OUTPUT_FILE }}' not found after script execution. Nothing to commit."
+            exit 0
+          fi
+
+          # Determine current branch
+          BRANCH_NAME="${{ github.ref_name }}"
+          echo "Current branch: ${BRANCH_NAME}"
+
+          # Pull latest changes from remote branch before committing to minimize conflicts
+          # Use rebase and autostash for cleaner history if possible
+          echo "Pulling latest changes from origin/${BRANCH_NAME} with rebase..."
+          git pull --rebase --autostash origin "${BRANCH_NAME}" || {
+            echo "::warning::'git pull --rebase' failed. Maybe the first run or complex history? Attempting merge pull..."
+            # Fallback to a standard merge pull if rebase fails
+            git pull --no-rebase origin "${BRANCH_NAME}" || {
+               echo "::warning::Both rebase and merge pull failed. Proceeding with commit attempt, but conflicts may occur later."
+            }
+          }
+
+          # Add the main output file and any optional detailed output files
+          echo "Adding files to git stage..."
+          git add "${{ env.OUTPUT_FILE }}"
+          if [ -n "${{ env.OUTPUT_CSV_FILE }}" ] && [ -f "${{ env.OUTPUT_CSV_FILE }}" ]; then
+             echo "Adding detailed CSV file: ${{ env.OUTPUT_CSV_FILE }}"
+             git add "${{ env.OUTPUT_CSV_FILE }}"
+          fi
+          if [ -n "${{ env.OUTPUT_JSON_FILE }}" ] && [ -f "${{ env.OUTPUT_JSON_FILE }}" ]; then
+             echo "Adding detailed JSON file: ${{ env.OUTPUT_JSON_FILE }}"
+             git add "${{ env.OUTPUT_JSON_FILE }}"
+          fi
+
+
+          # Check if there are any changes staged for commit
+          if git diff --staged --quiet; then
+            echo "No changes detected in tracked output files. Nothing to commit."
+            exit 0 # Exit successfully, no push needed
+          else
+            echo "Changes detected in output file(s)."
+            # Create commit message with date
+            COMMIT_DATE=$(date -u +'%Y-%m-%d %H:%M:%S %Z') # UTC Date
+            COMMIT_MSG="Update Proxies (${COMMIT_DATE})"
+            echo "Committing changes with message: ${COMMIT_MSG}"
+            git commit -m "$COMMIT_MSG"
+
+            # Push changes back to the repository with retries
+            echo "Pushing changes to origin/${BRANCH_NAME}..."
+            RETRY_COUNT=5
+            RETRY_DELAY=15 # Seconds between retries
+            n=0
+            until [ $n -ge $RETRY_COUNT ]
+            do
+               # Attempt push. Use --force-with-lease potentially if rebase issues common, but standard push safer first.
+               git push origin "${BRANCH_NAME}" && break # Exit loop on success
+               n=$((n+1))
+               echo "::warning::Push attempt $n failed. Retrying in $RETRY_DELAY seconds..."
+               sleep $RETRY_DELAY
+               # Optionally try pulling again before retry, might resolve simple conflicts
+               echo "Attempting git pull before retry..."
+               git pull --rebase --autostash origin "${BRANCH_NAME}" || echo "::warning::Pull before retry failed, continuing push attempt..."
+            done
+
+            if [ $n -ge $RETRY_COUNT ]; then
+              echo "::error::Failed to push changes after $RETRY_COUNT attempts."
+              # Optional: Reset HEAD to avoid leaving the branch in a committed-but-not-pushed state?
+              # git reset --hard HEAD~1
+              exit 1 # Fail the workflow run
+            fi
+            echo "Changes pushed successfully to origin/${BRANCH_NAME}."
+          fi
