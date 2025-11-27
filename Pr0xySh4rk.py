@@ -17,7 +17,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Set
 
 # ==============================================================================
 # DEPENDENCIES
@@ -44,10 +44,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Pr0xySh4rk")
 
-# ANSI Color Code Regex (To clean output)
 RE_ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-
-# Result Parsing Regex
 RE_DELAY = re.compile(r"(?:Real Delay|Latency|RTT)\s*[:=]\s*(\d+)\s*ms", re.IGNORECASE)
 RE_DOWNLOAD = re.compile(r"Downloaded.*?Speed\s*[:=]\s*([\d\.]+)\s*([KMG]?)bps", re.IGNORECASE)
 RE_IP_LOC = re.compile(r"ip=(?P<ip>[\d\.a-fA-F:]+).*?loc=(?P<loc>[A-Z]{2})", re.IGNORECASE | re.DOTALL)
@@ -62,11 +59,8 @@ COUNTRY_FLAGS = {
 }
 DEFAULT_FLAG = "🚩"
 DEFAULT_TEST_URL = "https://cp.cloudflare.com/"
-DEFAULT_TIMEOUT_MS = 6000 # Increased slightly
+DEFAULT_TIMEOUT_MS = 8000  # Increased timeout for stability
 
-# ==============================================================================
-# MODELS
-# ==============================================================================
 @dataclass
 class ProxyConfig:
     original: str
@@ -94,9 +88,6 @@ class ProxyConfig:
             "original": self.original
         }
 
-# ==============================================================================
-# HELPERS
-# ==============================================================================
 def strip_ansi(text: str) -> str:
     return RE_ANSI.sub('', text)
 
@@ -122,9 +113,6 @@ class GeoIPHandler:
             try: self.reader.close()
             except: pass
 
-# ==============================================================================
-# LOADER
-# ==============================================================================
 class ConfigLoader:
     def __init__(self, filepath: str):
         self.configs = []
@@ -134,16 +122,20 @@ class ConfigLoader:
         if not os.path.exists(self.filepath): sys.exit(1)
         with open(self.filepath, 'r', encoding='utf-8') as f: content = f.read().strip()
         
-        # Base64 Recursion
-        for _ in range(3):
+        # Recursive Base64 Decode
+        attempts = 0
+        while attempts < 3:
             if "://" not in content[:100] and len(content)>20 and "\n" not in content:
                 try:
                     pad = len(content)%4
                     if pad: content += "="*(4-pad)
                     decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
-                    if decoded.isprintable(): content = decoded
+                    if decoded.isprintable(): 
+                        content = decoded
+                        attempts += 1
+                        continue
                 except: break
-            else: break
+            break
 
         for line in content.splitlines():
             self._parse(line)
@@ -180,35 +172,35 @@ class ConfigLoader:
         self.configs = list(uniq.values())
         logger.info(f"Loaded {len(self.configs)} unique configs.")
 
-# ==============================================================================
-# TESTER
-# ==============================================================================
 class Tester:
     def __init__(self, xray_bin, geoip, speedtest, insecure):
         self.xray_bin = xray_bin
         self.geoip = geoip
         self.speedtest = speedtest
         self.insecure = insecure
+        self.fail_logs: Set[str] = set()
+        self.log_limit = 5  # Max unique error logs to print
 
     async def verify_bin(self):
         if not self.xray_bin: return False
         try:
-            # Check help to ensure binary runs
+            # Add current dir to PATH implicitly for check
+            env = os.environ.copy()
+            env["PATH"] = f"{os.getcwd()}:{env.get('PATH','')}"
             p = await asyncio.create_subprocess_exec(
                 self.xray_bin, "--help", 
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=env
             )
             await p.communicate()
             return True
         except: return False
 
     async def test_wg(self, c: ProxyConfig):
-        # Native Python UDP test
         try:
             if c.host == "unknown": raise ValueError("No host")
             loop = asyncio.get_running_loop()
             
-            # DNS
             try:
                 ai = await loop.getaddrinfo(c.host, c.port, type=socket.SOCK_DGRAM)
                 ip = ai[0][4][0]
@@ -216,7 +208,6 @@ class Tester:
             except: 
                 c.status = "failed"; c.reason="DNS"; return
 
-            # Probe
             t0 = loop.time()
             class P(asyncio.DatagramProtocol):
                 def __init__(self): self.f = asyncio.Future()
@@ -246,16 +237,15 @@ class Tester:
             c.status = "broken"; c.reason = str(e)
 
     async def test_xray(self, c: ProxyConfig):
-        # Subprocess Xray-Knife
         cmd = [self.xray_bin, "net", "http", "-c", c.original, "-d", str(DEFAULT_TIMEOUT_MS), "--url", DEFAULT_TEST_URL, "-z", "auto", "-v"]
-        if self.speedtest: cmd.extend(["-p", "-a", "2000"])
+        if self.speedtest: cmd.extend(["-p", "-a", "1000"]) # 1MB test to check bandwidth
         if self.insecure: cmd.append("-e")
         if not self.geoip.reader: cmd.append("--rip")
 
         try:
-            # Must add current dir to PATH for xray-core finding
+            # CRITICAL: PATH must include current dir for xray-core
             env = os.environ.copy()
-            env["PATH"] = f"{env.get('PATH', '')}:{os.getcwd()}"
+            env["PATH"] = f"{os.getcwd()}:{env.get('PATH', '')}"
             env["WSL_INTEROP"] = ""
 
             proc = await asyncio.create_subprocess_exec(
@@ -272,41 +262,40 @@ class Tester:
                 except: pass
                 c.status = "timeout"; return
 
-            # Decode and Clean Colors
             raw_output = (out.decode('utf-8', 'ignore') + err.decode('utf-8', 'ignore'))
             clean_output = strip_ansi(raw_output)
 
-            # Match
             dm = RE_DELAY.search(clean_output)
             if dm:
                 c.delay = float(dm.group(1))
                 c.status = "passed"
             else:
                 c.status = "failed"
-                # Debug reason
+                # Debug logging for failures (limited)
+                if len(self.fail_logs) < self.log_limit:
+                    err_snip = clean_output[:200].replace('\n', ' ')
+                    if err_snip not in self.fail_logs:
+                        self.fail_logs.add(err_snip)
+                        logger.warning(f"Xray Fail Sample: {err_snip}")
+                
                 if "timeout" in clean_output.lower(): c.reason = "Timeout"
-                elif "unsupported" in clean_output.lower(): c.reason = "Proto Unsupported"
                 else: c.reason = "Fail"
                 return
 
-            # Speed
             sm = RE_DOWNLOAD.search(clean_output)
             if sm:
                 val, unit = float(sm.group(1)), sm.group(2).upper()
                 c.speed_dl = val * (1000 if unit == 'G' else 0.001 if unit == 'K' else 1)
 
-            # IP
             im = RE_IP_LOC.search(clean_output)
             if im:
                 c.ip = im.group('ip')
                 if im.group('loc'): c.country, c.flag = im.group('loc'), COUNTRY_FLAGS.get(im.group('loc').upper(), DEFAULT_FLAG)
 
-            # Local GeoIP override
             if self.geoip.reader and c.ip:
                 cc, ff = self.geoip.lookup(c.ip)
                 if cc: c.country, c.flag = cc, ff
 
-            # Scoring
             c.score = c.delay / (1 + c.speed_dl) if c.speed_dl > 0 else c.delay
 
         except Exception as e:
@@ -317,9 +306,6 @@ class Tester:
             if c.protocol == "wg": await self.test_wg(c)
             else: await self.test_xray(c)
 
-# ==============================================================================
-# MAIN
-# ==============================================================================
 class Reporter:
     def __init__(self, prefix): self.prefix = prefix
     
