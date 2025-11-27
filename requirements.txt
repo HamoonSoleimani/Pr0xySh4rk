@@ -1,3 +1,5 @@
 requests
 urllib3
-PySocks
+tqdm
+python-dotenv
+geoip2
