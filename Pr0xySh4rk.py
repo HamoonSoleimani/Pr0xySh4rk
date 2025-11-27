@@ -4,6 +4,8 @@
 import argparse
 import asyncio
 import base64
+import csv
+import hashlib
 import json
 import logging
 import os
@@ -11,17 +13,15 @@ import re
 import shutil
 import signal
 import socket
-import subprocess
 import sys
 import time
 import urllib.parse
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any
 
 # ==============================================================================
-# OPTIONAL DEPENDENCIES
+# OPTIONAL DEPENDENCIES IMPORT
 # ==============================================================================
 try:
     import geoip2.database
@@ -37,191 +37,227 @@ except ImportError:
     TQDM_AVAILABLE = False
 
 # ==============================================================================
-# CONFIGURATION & CONSTANTS
+# CONSTANTS & CONFIGURATION
 # ==============================================================================
 
-# Logging Setup
+# Configure Logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(message)s',
+    format='%(asctime)s | %(levelname)8s | %(message)s',
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger("Pr0xySh4rk")
 
-# Country Flags Map
+# Comprehensive Flag Map
 COUNTRY_FLAGS = {
     "US": "🇺🇸", "DE": "🇩🇪", "NL": "🇳🇱", "GB": "🇬🇧", "FR": "🇫🇷", "CA": "🇨🇦", "JP": "🇯🇵",
     "SG": "🇸🇬", "HK": "🇭🇰", "AU": "🇦🇺", "CH": "🇨🇭", "SE": "🇸🇪", "FI": "🇫🇮", "NO": "🇳🇴",
     "IE": "🇮🇪", "IT": "🇮🇹", "ES": "🇪🇸", "PL": "🇵🇱", "RO": "🇷🇴", "TR": "🇹🇷", "RU": "🇷🇺",
     "UA": "🇺🇦", "IR": "🇮🇷", "AE": "🇦🇪", "CN": "🇨🇳", "IN": "🇮🇳", "BR": "🇧🇷", "ZA": "🇿🇦",
-    "KR": "🇰🇷", "TW": "🇹🇼", "VN": "🇻🇳", "ID": "🇮🇩", "MY": "🇲🇾", "TH": "🇹🇭"
+    "KR": "🇰🇷", "TW": "🇹🇼", "VN": "🇻🇳", "ID": "🇮🇩", "MY": "🇲🇾", "TH": "🇹🇭", "KZ": "🇰🇿",
+    "SA": "🇸🇦", "EG": "🇪🇬", "IL": "🇮🇱", "PK": "🇵🇰", "BD": "🇧🇩", "PH": "🇵🇭"
 }
-DEFAULT_FLAG = "🏳️"
-UNKNOWN_FLAG = "🏴‍☠️"
+DEFAULT_FLAG = "🚩"
 
-# Regex Patterns for Parsing xray-knife output
+# Regex Patterns for Parsing xray-knife stdout/stderr
+# Optimized to handle variations in xray-knife versions
 RE_DELAY = re.compile(r"(?:Real Delay|Latency)\s*[:=]\s*(\d+)\s*ms", re.IGNORECASE)
 RE_DOWNLOAD = re.compile(r"Downloaded.*?Speed\s*[:=]\s*([\d\.]+)\s*([KMG]?)bps", re.IGNORECASE)
-RE_UPLOAD = re.compile(r"Uploaded.*?Speed\s*[:=]\s*([\d\.]+)\s*([KMG]?)bps", re.IGNORECASE)
 RE_IP_LOC = re.compile(r"ip=(?P<ip>[\d\.a-fA-F:]+).*?loc=(?P<loc>[A-Z]{2})", re.IGNORECASE | re.DOTALL)
-RE_ERROR = re.compile(r"(?:error|failed|timeout|refused|deadline)[:\s]+(.+)", re.IGNORECASE)
+RE_CRITICAL_ERROR = re.compile(r"(?:panic|fatal error|segmentation fault)", re.IGNORECASE)
 
-# Defaults
-DEFAULT_TEST_URL = "https://cp.cloudflare.com/"  # Fast, global
-DEFAULT_TIMEOUT = 5000  # ms
-DEFAULT_UDP_TIMEOUT = 3.0  # seconds
+DEFAULT_TEST_URL = "https://cp.cloudflare.com/"
+DEFAULT_TIMEOUT_MS = 5000
 
 # ==============================================================================
-# DATA STRUCTURES
+# DATA MODELS
 # ==============================================================================
 
 @dataclass
-class ConfigResult:
+class ProxyConfig:
     original: str
     protocol: str
-    status: str = "pending"  # pending, passed, failed, timeout
+    status: str = "pending"  # pending, passed, failed, timeout, skipped
     reason: str = ""
     delay: float = float('inf')
     speed_dl: float = 0.0
-    speed_ul: float = 0.0
     ip: str = ""
     country: str = ""
     flag: str = ""
     score: float = float('inf')
-    
-    def to_dict(self):
-        return asdict(self)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_csv_dict(self):
+        d = asdict(self)
+        d.pop('metadata', None)
+        return d
 
 # ==============================================================================
-# CORE LOGIC: MANAGER
+# MODULE: GEOIP HANDLER
 # ==============================================================================
 
-class ConfigManager:
-    def __init__(self, input_file: str):
-        self.input_file = input_file
-        self.configs: List[ConfigResult] = []
-
-    def load_configs(self):
-        """Reads input file, handles base64, parses protocols."""
-        if not os.path.exists(self.input_file):
-            logger.error(f"Input file not found: {self.input_file}")
-            sys.exit(1)
-
-        try:
-            with open(self.input_file, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-            
-            # Heuristic: Check if file is one giant Base64 string
-            if "://" not in content[:100] and len(content) > 50:
-                try:
-                    logger.info("Input appears to be Base64 encoded. Decoding...")
-                    # Fix padding
-                    pad = len(content) % 4
-                    if pad: content += "=" * (4 - pad)
-                    content = base64.b64decode(content).decode('utf-8', errors='ignore')
-                except Exception as e:
-                    logger.warning(f"Base64 decode failed, proceeding as text: {e}")
-
-            lines = content.splitlines()
-            for line in lines:
-                line = line.strip()
-                if not line or line.startswith("#"): continue
-                
-                proto = self._detect_protocol(line)
-                if proto:
-                    self.configs.append(ConfigResult(original=line, protocol=proto))
-            
-            logger.info(f"Loaded {len(self.configs)} raw configs.")
-
-        except Exception as e:
-            logger.error(f"Error loading configs: {e}")
-            sys.exit(1)
-
-    def _detect_protocol(self, line: str) -> Optional[str]:
-        # Order matters slightly for efficiency
-        if line.startswith("vless://"): return "vless"
-        if line.startswith("vmess://"): return "vmess"
-        if line.startswith("trojan://"): return "trojan"
-        if line.startswith("ss://"): return "ss"
-        if line.startswith("ssr://"): return "ssr"
-        if line.startswith(("tuic://")): return "tuic"
-        if line.startswith(("hysteria://", "hysteria2://", "hy2://")): return "hysteria"
-        if line.startswith(("wg://", "wireguard://", "warp://")): return "wg"
-        return None
-
-    def deduplicate(self):
-        """
-        Advanced deduplication based on parsed URL components.
-        Prevents duplicate servers with different names.
-        """
-        unique_map = {}
-        duplicates = 0
-
-        for cfg in self.configs:
+class GeoIPHandler:
+    def __init__(self, db_path: Optional[str]):
+        self.reader = None
+        if GEOIP_AVAILABLE and db_path and os.path.exists(db_path):
             try:
-                # Basic parsing
-                parsed = urllib.parse.urlparse(cfg.original)
-                host = parsed.hostname
-                port = parsed.port
-                
-                # If we can't parse host/port, fall back to full string
-                if not host or not port:
-                    key = cfg.original
-                else:
-                    # Deep check key: Protocol + Host + Port + Path + Query
-                    # This handles cases where same server runs different configs
-                    path = parsed.path
-                    query = parsed.query
-                    key = f"{cfg.protocol}://{host}:{port}{path}?{query}"
-                
-                if key not in unique_map:
-                    unique_map[key] = cfg
-                else:
-                    duplicates += 1
-            except:
-                continue
-
-        self.configs = list(unique_map.values())
-        logger.info(f"Deduplication finished. Removed {duplicates}. Unique: {len(self.configs)}")
-
-# ==============================================================================
-# CORE LOGIC: TESTER
-# ==============================================================================
-
-class ProxyTester:
-    def __init__(self, xray_path: str, geoip_db: str, speedtest: bool, 
-                 timeout: int, insecure: bool):
-        self.xray_path = xray_path
-        self.geoip_reader = None
-        self.speedtest = speedtest
-        self.timeout = timeout
-        self.insecure = insecure
-        
-        if GEOIP_AVAILABLE and geoip_db and os.path.exists(geoip_db):
-            try:
-                self.geoip_reader = geoip2.database.Reader(geoip_db)
-                logger.info(f"GeoIP Database loaded: {geoip_db}")
+                self.reader = geoip2.database.Reader(db_path)
+                logger.info(f"GeoIP Database loaded: {db_path}")
             except Exception as e:
                 logger.error(f"Failed to load GeoIP DB: {e}")
 
-    def _get_flag(self, ip: str) -> Tuple[str, str]:
-        if not self.geoip_reader or not ip:
+    def lookup(self, ip_address: str) -> Tuple[str, str]:
+        if not self.reader or not ip_address:
             return "", DEFAULT_FLAG
+        
         try:
-            # Strip IPv6 brackets
-            clean_ip = ip.strip("[]")
-            record = self.geoip_reader.country(clean_ip)
-            iso = record.country.iso_code
-            if iso:
-                return iso, COUNTRY_FLAGS.get(iso.upper(), DEFAULT_FLAG)
-        except:
+            # Handle IPv6 brackets
+            clean_ip = ip_address.strip("[]")
+            record = self.reader.country(clean_ip)
+            iso_code = record.country.iso_code
+            if iso_code:
+                flag = COUNTRY_FLAGS.get(iso_code.upper(), DEFAULT_FLAG)
+                return iso_code, flag
+        except (ValueError, geoip2.errors.AddressNotFoundError):
             pass
+        except Exception:
+            pass
+            
         return "", DEFAULT_FLAG
 
-    async def test_wg_udp(self, config: ConfigResult):
+    def close(self):
+        if self.reader:
+            self.reader.close()
+
+# ==============================================================================
+# MODULE: CONFIG LOADER & DEDUPLICATOR
+# ==============================================================================
+
+class ConfigLoader:
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+        self.configs: List[ProxyConfig] = []
+
+    def _normalize_content(self, content: str) -> str:
         """
-        Tests WireGuard/WARP/UDP protocols using native Python AsyncIO.
-        Sends a dummy byte to trigger a response or ICMP unreachable.
+        Detects if content is Base64 and decodes it.
+        Also handles standard whitespace issues.
+        """
+        content = content.strip()
+        
+        # Heuristic: If it looks like one long string with no spaces/newlines
+        # and doesn't start with a protocol, it's likely Base64.
+        if "://" not in content[:50] and len(content) > 50 and "\n" not in content[:50]:
+            try:
+                logger.info("Input file appears to be Base64 encoded. Decoding...")
+                # Fix padding
+                pad = len(content) % 4
+                if pad:
+                    content += "=" * (4 - pad)
+                decoded_bytes = base64.b64decode(content)
+                return decoded_bytes.decode('utf-8', errors='ignore')
+            except Exception as e:
+                logger.warning(f"Base64 decoding failed ({e}). Treating as plain text.")
+                
+        return content
+
+    def _parse_line(self, line: str) -> Optional[ProxyConfig]:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            return None
+        
+        # Protocol Detection
+        proto = None
+        lower_line = line.lower()
+        if lower_line.startswith("vmess://"): proto = "vmess"
+        elif lower_line.startswith("vless://"): proto = "vless"
+        elif lower_line.startswith("trojan://"): proto = "trojan"
+        elif lower_line.startswith("ss://"): proto = "ss"
+        elif lower_line.startswith("ssr://"): proto = "ssr"
+        elif lower_line.startswith("tuic://"): proto = "tuic"
+        elif lower_line.startswith(("hysteria://", "hysteria2://", "hy2://")): proto = "hysteria"
+        elif lower_line.startswith(("wg://", "wireguard://", "warp://")): proto = "wg"
+        
+        if proto:
+            return ProxyConfig(original=line, protocol=proto)
+        return None
+
+    def load(self):
+        if not os.path.exists(self.filepath):
+            logger.critical(f"Input file not found: {self.filepath}")
+            sys.exit(1)
+
+        try:
+            with open(self.filepath, 'r', encoding='utf-8') as f:
+                raw_content = f.read()
+            
+            content = self._normalize_content(raw_content)
+            
+            for line in content.splitlines():
+                cfg = self._parse_line(line)
+                if cfg:
+                    self.configs.append(cfg)
+            
+            logger.info(f"Loaded {len(self.configs)} raw configurations.")
+            
+        except Exception as e:
+            logger.critical(f"Fatal error reading input file: {e}")
+            sys.exit(1)
+
+    def deduplicate(self):
+        """
+        Advanced Deduplication:
+        Parses the URL to create a unique hash based on Protocol, Host, Port, and Path.
+        This ignores fragment (#name) and other non-functional parts.
+        """
+        unique_map = {}
+        duplicates_count = 0
+
+        for cfg in self.configs:
+            try:
+                parsed = urllib.parse.urlparse(cfg.original)
+                
+                # Robust Key Generation
+                if parsed.hostname and parsed.port:
+                    # Key: proto://host:port/path?query
+                    key_str = f"{cfg.protocol}://{parsed.hostname}:{parsed.port}{parsed.path}?{parsed.query}"
+                else:
+                    # Fallback for complex/obfuscated strings (like some ss://)
+                    key_str = cfg.original
+
+                # Generate Hash
+                key_hash = hashlib.md5(key_str.encode('utf-8')).hexdigest()
+
+                if key_hash not in unique_map:
+                    unique_map[key_hash] = cfg
+                else:
+                    duplicates_count += 1
+            except Exception:
+                # If parsing fails, keep it to be safe (or discard)
+                # Here we treat raw string as unique
+                if cfg.original not in unique_map:
+                    unique_map[cfg.original] = cfg
+
+        self.configs = list(unique_map.values())
+        logger.info(f"Deduplication complete. Removed {duplicates_count} duplicates. Active: {len(self.configs)}")
+
+# ==============================================================================
+# MODULE: ASYNC TESTER
+# ==============================================================================
+
+class AsyncTester:
+    def __init__(self, xray_bin: str, geoip: GeoIPHandler, 
+                 speedtest: bool, insecure: bool, timeout: int):
+        self.xray_bin = xray_bin
+        self.geoip = geoip
+        self.speedtest = speedtest
+        self.insecure = insecure
+        self.timeout = timeout
+
+    async def _test_wg_native(self, config: ProxyConfig):
+        """
+        Pure Python AsyncIO UDP test for WireGuard/WARP.
+        Sends a dummy packet to check reachability.
         """
         try:
             parsed = urllib.parse.urlparse(config.original)
@@ -229,37 +265,32 @@ class ProxyTester:
             port = parsed.port
             
             if not host or not port:
-                config.status = "failed"
-                config.reason = "Invalid URL"
-                return
+                raise ValueError("Invalid WireGuard URI")
 
             loop = asyncio.get_running_loop()
             
-            # 1. Resolve DNS (Async)
+            # 1. DNS Resolution (Async)
             try:
                 addr_info = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
                 target_ip = addr_info[0][4][0]
                 family = addr_info[0][0]
-            except Exception as e:
+            except Exception:
                 config.status = "failed"
-                config.reason = "DNS Resolution Error"
+                config.reason = "DNS Error"
                 return
 
-            # 2. UDP Handshake / Reachability
-            # We use a connected UDP socket to detect ICMP errors immediately if possible
-            # and measure RTT.
-            
+            # 2. UDP Socket Interaction
             start_time = loop.time()
             
-            # Simple One-Shot UDP Protocol
-            class PingProtocol(asyncio.DatagramProtocol):
+            # Helper Protocol for asyncio
+            class ProbeProtocol(asyncio.DatagramProtocol):
                 def __init__(self):
                     self.transport = None
                     self.received = asyncio.Future()
                 def connection_made(self, transport):
                     self.transport = transport
-                    # Send empty packet or simple handshake
-                    self.transport.sendto(b'\x00\x00\x00\x00') 
+                    # Send a 4-byte empty packet (enough to trigger a response or error)
+                    self.transport.sendto(b'\x00\x00\x00\x00')
                 def datagram_received(self, data, addr):
                     if not self.received.done():
                         self.received.set_result(True)
@@ -271,350 +302,370 @@ class ProxyTester:
 
             try:
                 transport, protocol = await loop.create_datagram_endpoint(
-                    lambda: PingProtocol(),
+                    lambda: ProbeProtocol(),
                     remote_addr=(target_ip, port),
                     family=family
                 )
                 
-                # Wait for response with timeout
-                # Note: Many WG servers won't respond to garbage, but if we don't get 
-                # "Connection Refused", the port is open-ish. 
-                # For strict testing, we consider no-ICMP-error as 'maybe-alive' 
-                # or wait for a very short timeout.
-                # Here, we assume if we send and wait 1s without error, it's alive.
-                
-                await asyncio.wait_for(protocol.received, timeout=1.5)
-                # If we received something, great.
+                # Wait for response with short timeout
+                # Note: WireGuard is silent. If we get NO error (ICMP Unreachable), 
+                # we technically don't know if it's up or dropped.
+                # However, for scanning purposes, connection refused/unreachable = fail.
+                # A timeout implies the packet was sent successfully into the void (or firewall).
+                await asyncio.wait_for(protocol.received, timeout=2.0)
                 
             except asyncio.TimeoutError:
-                # UDP is connectionless. Timeout means no reply. 
-                # For WG, no reply often means it's working (Silent Drop) but reachable.
-                # We mark as "passed" but with a penalty if we can't verify handshake.
-                # However, to be strict, we treat successful send without error as pass.
-                pass
+                # Timeout in UDP often means "Packet Sent, No ICMP Error received". 
+                # For WG, this is a positive sign of life/firewall accept.
+                pass 
             except Exception:
-                # Connection refused or other network error
                 config.status = "failed"
                 config.reason = "Unreachable"
-                if transport: transport.close()
+                if 'transport' in locals() and transport: transport.close()
                 return
 
+            # Cleanup
+            if 'transport' in locals() and transport: transport.close()
+            
             end_time = loop.time()
-            if transport: transport.close()
-
-            config.status = "passed"
             config.delay = (end_time - start_time) * 1000
+            config.status = "passed"
             config.ip = target_ip
             
-            # GeoIP lookup
-            config.country, config.flag = self._get_flag(target_ip)
+            # GeoIP Lookup
+            c, f = self.geoip.lookup(target_ip)
+            config.country, config.flag = c, f
             
-            # WireGuard doesn't have "Speed" in this simple test, use delay for score
+            # Scoring
             config.score = config.delay
 
         except Exception as e:
             config.status = "broken"
             config.reason = str(e)
 
-    async def test_xray(self, config: ConfigResult):
+    async def _test_xray_knife(self, config: ProxyConfig):
         """
-        Wraps xray-knife subprocess in asyncio.
+        Wraps the xray-knife binary in an async subprocess.
         """
         # Build Command
         cmd = [
-            self.xray_path, "net", "http",
+            self.xray_bin, "net", "http",
             "-c", config.original,
             "-d", str(self.timeout),
             "--url", DEFAULT_TEST_URL,
-            "-z", "auto", # core selection
+            "-z", "auto",
             "-v"
         ]
         
         if self.speedtest:
-            # -p: speedtest, -a: amount (kb)
-            cmd.extend(["-p", "-a", "2000"]) 
-        
+            # -p enables speedtest, -a sets amount (2000kb = 2MB)
+            cmd.extend(["-p", "-a", "2000"])
+            
         if self.insecure:
             cmd.append("-e")
             
-        # Use built-in IP checking if we don't have local DB, 
-        # otherwise we do it locally to save time on external requests
-        if not self.geoip_reader:
+        # If we don't have local GeoIP, ask xray-knife to fetch it
+        if not self.geoip.reader:
             cmd.append("--rip")
 
         try:
-            # Create subprocess
+            # Execute
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "WSL_INTEROP": ""} # Clean env
+                # Clear WSL interop env var to prevent Windows host binary interference in WSL
+                env={**os.environ, "WSL_INTEROP": ""}
             )
-
-            # Wait with safety buffer
+            
+            # Wait for completion with a safety margin over the internal timeout
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=(self.timeout/1000) + 5)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), 
+                    timeout=(self.timeout / 1000) + 5
+                )
             except asyncio.TimeoutError:
                 try: proc.kill()
                 except: pass
                 config.status = "timeout"
+                config.reason = "Subprocess Hung"
                 return
 
             output = (stdout.decode('utf-8', errors='ignore') + 
                       stderr.decode('utf-8', errors='ignore'))
-
-            # Parse Results
-            delay_m = RE_DELAY.search(output)
-            if delay_m:
-                config.delay = float(delay_m.group(1))
+            
+            # Parse Latency
+            delay_match = RE_DELAY.search(output)
+            if delay_match:
+                config.delay = float(delay_match.group(1))
                 config.status = "passed"
             else:
                 config.status = "failed"
-                err_m = RE_ERROR.search(output)
-                if err_m: config.reason = err_m.group(1).strip()
+                # Try to find reason
+                if "timeout" in output.lower():
+                    config.reason = "Timeout"
+                else:
+                    config.reason = "Connection Failed"
                 return
 
-            # Speed
-            dl_m = RE_DOWNLOAD.search(output)
-            if dl_m:
-                val, unit = float(dl_m.group(1)), dl_m.group(2).upper()
-                if unit == 'K': config.speed_dl = val / 1000
-                elif unit == 'M': config.speed_dl = val
-                elif unit == 'G': config.speed_dl = val * 1000
-                else: config.speed_dl = val / 1000000
+            # Parse Speed
+            speed_match = RE_DOWNLOAD.search(output)
+            if speed_match:
+                val = float(speed_match.group(1))
+                unit = speed_match.group(2).upper()
+                multiplier = 1.0
+                if unit == 'K': multiplier = 0.001
+                elif unit == 'G': multiplier = 1000.0
+                config.speed_dl = val * multiplier
 
-            # IP / Location
-            ip_m = RE_IP_LOC.search(output)
-            if ip_m:
-                config.ip = ip_m.group('ip')
-                # If xray-knife found loc, use it
-                if ip_m.group('loc'):
-                    config.country = ip_m.group('loc')
+            # Parse IP/Location
+            ip_match = RE_IP_LOC.search(output)
+            if ip_match:
+                config.ip = ip_match.group("ip")
+                if ip_match.group("loc"):
+                    config.country = ip_match.group("loc")
                     config.flag = COUNTRY_FLAGS.get(config.country.upper(), DEFAULT_FLAG)
             
-            # Local GeoIP override (more reliable/standardized)
-            if self.geoip_reader and config.ip:
-                c, f = self._get_flag(config.ip)
+            # Fallback/Override with Local GeoIP
+            if self.geoip.reader and config.ip:
+                c, f = self.geoip.lookup(config.ip)
                 if c:
-                    config.country = c
-                    config.flag = f
+                    config.country, config.flag = c, f
 
-            # Scoring: Lower is better.
-            # Score = Delay / (1 + Speed)
-            # High speed reduces the score significantly.
-            config.score = config.delay
+            # Scoring Algorithm:
+            # Base Score = Latency
+            # Speed Bonus = Divisor based on speed
+            # Formula: Latency / (1 + SpeedMBps)
+            # Example: 200ms, 0 speed = 200
+            # Example: 200ms, 10MBps speed = 200 / 11 = ~18
             if config.speed_dl > 0:
-                config.score = config.delay / (1 + config.speed_dl)
+                config.score = config.delay / (1.0 + config.speed_dl)
+            else:
+                config.score = config.delay
 
         except Exception as e:
             config.status = "broken"
             config.reason = str(e)
 
-    async def run_worker(self, config: ConfigResult, sem: asyncio.Semaphore):
-        async with sem:
+    async def worker(self, config: ProxyConfig, semaphore: asyncio.Semaphore):
+        async with semaphore:
             if config.protocol == "wg":
-                await self.test_wg_udp(config)
+                await self._test_wg_native(config)
             else:
-                await self.test_xray(config)
+                await self._test_xray_knife(config)
 
 # ==============================================================================
-# CORE LOGIC: REPORTER
+# MODULE: REPORTER
 # ==============================================================================
 
 class Reporter:
     def __init__(self, prefix: str):
         self.prefix = prefix
 
-    def rename_and_format(self, configs: List[ConfigResult], limit: int) -> List[str]:
-        # Filter passed
+    def generate_output(self, configs: List[ProxyConfig], limit: int) -> List[str]:
+        # Filter only passed
         passed = [c for c in configs if c.status == "passed"]
         
-        # Group by protocol
+        # Group by Protocol
         grouped = {}
         for c in passed:
-            if c.protocol not in grouped: grouped[c.protocol] = []
+            if c.protocol not in grouped:
+                grouped[c.protocol] = []
             grouped[c.protocol].append(c)
-            
+        
         final_lines = []
         
         for proto, items in grouped.items():
             # Sort by Score (ascending = better)
             items.sort(key=lambda x: x.score)
             
-            # Take top N
-            selected = items[:limit]
+            # Apply Limit
+            selection = items[:limit]
             
-            for idx, res in enumerate(selected, 1):
-                flag = res.flag if res.flag else UNKNOWN_FLAG
+            for idx, res in enumerate(selection, 1):
+                flag = res.flag if res.flag else DEFAULT_FLAG
                 
-                # Naming Convention: 🔒Prefix🦈[PROTO][NUM][FLAG]
+                # Construct Name: 🔒Prefix🦈[PROTO][ID][FLAG][SPEED?]
                 alias = f"🔒{self.prefix}🦈[{proto.upper()}][{idx:02d}][{flag}]"
-                
-                # Add speed info to name if available
                 if res.speed_dl > 0:
                     alias += f"[{res.speed_dl:.1f}M]"
                 
+                # Encode alias for URL fragment
                 encoded_alias = urllib.parse.quote(alias)
                 
-                # Replace existing fragment or append
-                if "#" in res.original:
-                    base = res.original.split("#", 1)[0]
-                else:
-                    base = res.original
-                    
-                final_lines.append(f"{base}#{encoded_alias}")
+                # Clean original config (remove existing fragment)
+                base_config = res.original.split("#")[0]
                 
+                final_lines.append(f"{base_config}#{encoded_alias}")
+        
         return final_lines
 
-    def save_file(self, content_lines: List[str], path: str, fmt: str):
-        data = "\n".join(content_lines)
+    def save_to_file(self, lines: List[str], path: str, fmt: str):
+        content = "\n".join(lines)
+        
         if fmt == "base64":
-            data = base64.b64encode(data.encode('utf-8')).decode('utf-8')
+            content = base64.b64encode(content.encode('utf-8')).decode('utf-8')
             
-        with open(path, "w", encoding='utf-8') as f:
-            f.write(data)
+        try:
+            with open(path, "w", encoding='utf-8') as f:
+                f.write(content)
+            logger.info(f"Successfully saved {len(lines)} configs to {path} ({fmt})")
+        except Exception as e:
+            logger.error(f"Failed to write output file: {e}")
 
-    def save_csv(self, results: List[ConfigResult], path: str):
-        import csv
-        fieldnames = ["protocol", "status", "delay", "speed_dl", "ip", "country", "score", "reason", "original"]
+    def save_csv(self, configs: List[ProxyConfig], path: str):
         try:
             with open(path, "w", newline="", encoding="utf-8") as f:
+                fieldnames = ["protocol", "status", "delay", "speed_dl", "ip", "country", "score", "reason", "original"]
                 writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
-                for r in results:
-                    writer.writerow(r.to_dict())
+                for c in configs:
+                    writer.writerow(c.to_csv_dict())
+            logger.info(f"CSV Report saved to {path}")
         except Exception as e:
-            logger.error(f"Failed to save CSV: {e}")
+            logger.error(f"Failed to write CSV: {e}")
 
 # ==============================================================================
-# MAIN EXECUTION
+# UTILITIES & MAIN
 # ==============================================================================
 
-def setup_args():
-    parser = argparse.ArgumentParser(description="Pr0xySh4rk: Advanced Proxy Processor")
-    
-    group_io = parser.add_argument_group("Input/Output")
-    group_io.add_argument("--input", required=True, help="Input file path")
-    group_io.add_argument("--output", required=True, help="Output file path")
-    group_io.add_argument("--output-format", choices=["text", "base64"], default="base64")
-    group_io.add_argument("--csv", help="Optional CSV report output path")
-    
-    group_test = parser.add_argument_group("Testing")
-    group_test.add_argument("--xray-knife-path", help="Path to xray-knife binary")
-    group_test.add_argument("--geoip-db", help="Path to Country.mmdb")
-    group_test.add_argument("--threads", type=int, default=30, help="Concurrency level")
-    group_test.add_argument("--limit", type=int, default=50, help="Limit per protocol")
-    group_test.add_argument("--speedtest", action="store_true", help="Perform speed test")
-    group_test.add_argument("--insecure", action="store_true", help="Allow insecure TLS")
-    
-    group_meta = parser.add_argument_group("Meta")
-    group_meta.add_argument("--name-prefix", default="Pr0xySh4rk", help="Prefix for config names")
-    
-    return parser.parse_args()
-
-def find_binary(name: str, specific_path: str = None) -> str:
+def find_executable(name: str, specific_path: Optional[str] = None) -> str:
+    # 1. Check specific path provided by args
     if specific_path:
         p = Path(specific_path)
         if p.exists() and os.access(p, os.X_OK):
             return str(p.resolve())
     
-    # Check env
-    if os.environ.get("XRAY_KNIFE_PATH"):
-         p = Path(os.environ["XRAY_KNIFE_PATH"])
-         if p.exists(): return str(p)
-
-    # Check path
+    # 2. Check PATH
     found = shutil.which(name)
-    if found: return found
+    if found:
+        return found
     
-    # Check current dir
+    # 3. Check current directory
     local = Path(os.getcwd()) / name
     if local.exists() and os.access(local, os.X_OK):
-        return str(local)
+        return str(local.resolve())
         
     return ""
 
-async def async_main():
-    args = setup_args()
+def parse_cli_args():
+    parser = argparse.ArgumentParser(description="Pr0xySh4rk: Advanced Proxy Config Processor")
     
-    # 1. Initialize Components
-    manager = ConfigManager(args.input)
-    reporter = Reporter(args.name_prefix)
+    # I/O Groups
+    io_group = parser.add_argument_group("Input/Output")
+    io_group.add_argument("--input", required=True, help="Input file path")
+    io_group.add_argument("--output", required=True, help="Output file path")
+    io_group.add_argument("--output-format", choices=["text", "base64"], default="base64")
+    io_group.add_argument("--csv", help="Optional path to save CSV details")
     
-    # Locate Xray-Knife
-    xray_bin = find_binary("xray-knife", args.xray_knife_path)
-    if not xray_bin:
-        logger.warning("xray-knife not found! Only WireGuard tests will run.")
+    # Settings Groups
+    settings = parser.add_argument_group("Settings")
+    settings.add_argument("--threads", type=int, default=30, help="Max concurrent checks")
+    settings.add_argument("--limit", type=int, default=50, help="Max configs per protocol")
+    settings.add_argument("--name-prefix", default="Pr0xySh4rk", help="Config alias prefix")
     
-    tester = ProxyTester(
-        xray_path=xray_bin,
-        geoip_db=args.geoip_db,
-        speedtest=args.speedtest,
-        timeout=DEFAULT_TIMEOUT,
-        insecure=args.insecure
-    )
+    # Testing Config
+    testing = parser.add_argument_group("Testing")
+    testing.add_argument("--xray-knife-path", help="Path to xray-knife binary")
+    testing.add_argument("--geoip-db", help="Path to MaxMind DB")
+    testing.add_argument("--speedtest", action="store_true", help="Enable bandwidth testing")
+    
+    # FIX: Explicitly handle the flag passed by GitHub Action
+    testing.add_argument("--xray-knife-insecure", action="store_true", dest="insecure", 
+                         help="Allow insecure TLS connections")
+    
+    # Compatibility arguments (to prevent crash if Action passes them)
+    testing.add_argument("--speedtest-amount", help="Legacy argument (ignored)")
+    
+    return parser.parse_args()
 
-    # 2. Load & Dedup
-    logger.info("Loading configurations...")
-    manager.load_configs()
-    manager.deduplicate()
+async def async_main():
+    args = parse_cli_args()
     
-    total = len(manager.configs)
-    if total == 0:
-        logger.error("No valid configurations found.")
+    # 1. Load Configurations
+    loader = ConfigLoader(args.input)
+    loader.load()
+    loader.deduplicate()
+    
+    if not loader.configs:
+        logger.warning("No valid configurations to test.")
         sys.exit(0)
 
-    # 3. Test Loop
-    logger.info(f"Starting tests on {total} configs (Threads: {args.threads})...")
+    # 2. Setup Components
+    geoip = GeoIPHandler(args.geoip_db)
     
-    sem = asyncio.Semaphore(args.threads)
+    xray_bin = find_executable("xray-knife", args.xray_knife_path)
+    if not xray_bin:
+        logger.warning("xray-knife binary not found! Non-WireGuard protocols will fail.")
+    
+    tester = AsyncTester(
+        xray_bin=xray_bin,
+        geoip=geoip,
+        speedtest=args.speedtest,
+        insecure=args.insecure,
+        timeout=DEFAULT_TIMEOUT_MS
+    )
+    
+    # 3. Execution Loop
+    logger.info(f"Starting async tests with {args.threads} threads...")
+    
+    semaphore = asyncio.Semaphore(args.threads)
     tasks = []
-    for cfg in manager.configs:
-        # Skip Xray tests if binary missing
-        if cfg.protocol != "wg" and not xray_bin:
-            cfg.status = "skipped"
-            cfg.reason = "No xray-knife"
+    
+    for config in loader.configs:
+        # Skip Xray protocols if binary is missing
+        if config.protocol != "wg" and not xray_bin:
+            config.status = "skipped"
+            config.reason = "Binary missing"
             continue
-        tasks.append(tester.run_worker(cfg, sem))
-
+            
+        tasks.append(tester.worker(config, semaphore))
+    
     if TQDM_AVAILABLE:
-        for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), unit="cfg"):
+        # Nice progress bar
+        for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), unit="cfg", desc="Testing"):
             await f
     else:
-        # Simple progress report
-        done = 0
+        # Standard progress
+        completed = 0
+        total = len(tasks)
         for f in asyncio.as_completed(tasks):
             await f
-            done += 1
-            if done % 10 == 0:
-                print(f"Progress: {done}/{total}", end='\r', file=sys.stderr)
-        print("", file=sys.stderr)
+            completed += 1
+            if completed % 10 == 0 or completed == total:
+                sys.stdout.write(f"\rTesting: {completed}/{total}")
+                sys.stdout.flush()
+        print("") # Newline
 
-    # 4. Processing Results
-    passed_count = sum(1 for c in manager.configs if c.status == "passed")
-    logger.info(f"Testing complete. Passed: {passed_count}/{total}")
-
-    # 5. Formatting & Saving
-    final_lines = reporter.rename_and_format(manager.configs, args.limit)
-    reporter.save_file(final_lines, args.output, args.output_format)
-    logger.info(f"Saved {len(final_lines)} active configs to {args.output}")
-
+    # 4. Reporting
+    reporter = Reporter(args.name_prefix)
+    
+    output_lines = reporter.generate_output(loader.configs, args.limit)
+    reporter.save_to_file(output_lines, args.output, args.output_format)
+    
     if args.csv:
-        reporter.save_csv(manager.configs, args.csv)
-        logger.info(f"CSV report saved to {args.csv}")
+        reporter.save_csv(loader.configs, args.csv)
+
+    # Summary Log
+    passed_count = len([c for c in loader.configs if c.status == "passed"])
+    logger.info(f"Processing Complete. {passed_count}/{len(loader.configs)} working configs saved.")
+    
+    geoip.close()
 
 def main():
+    # Setup Signal Handling
     signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
     
+    # Windows Selector Policy fix for Python 3.8+ on Windows
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
+
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:
-        logger.info("Process interrupted by user.")
+        logger.info("Interrupted by user.")
     except Exception as e:
-        logger.exception(f"Unexpected error: {e}")
+        logger.exception(f"Unexpected runtime error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
