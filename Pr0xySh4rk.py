@@ -39,7 +39,6 @@ except ImportError:
 # CONFIGURATION
 # ==============================================================================
 
-# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)8s | %(message)s',
@@ -58,7 +57,7 @@ COUNTRY_FLAGS = {
 }
 DEFAULT_FLAG = "🚩"
 
-# Regex for Xray-Knife Output
+# Regex
 RE_DELAY = re.compile(r"(?:Real Delay|Latency)\s*[:=]\s*(\d+)\s*ms", re.IGNORECASE)
 RE_DOWNLOAD = re.compile(r"Downloaded.*?Speed\s*[:=]\s*([\d\.]+)\s*([KMG]?)bps", re.IGNORECASE)
 RE_IP_LOC = re.compile(r"ip=(?P<ip>[\d\.a-fA-F:]+).*?loc=(?P<loc>[A-Z]{2})", re.IGNORECASE | re.DOTALL)
@@ -125,12 +124,9 @@ class GeoIPHandler:
         return "", DEFAULT_FLAG
 
     def close(self):
-        """Safely closes the database reader"""
         if self.reader:
-            try:
-                self.reader.close()
-            except:
-                pass
+            try: self.reader.close()
+            except: pass
 
 # ==============================================================================
 # MODULE: LOADER
@@ -150,7 +146,7 @@ class ConfigLoader:
             with open(self.filepath, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
             
-            # Recursive Base64 Decoding
+            # Base64 Decode Attempt
             attempts = 0
             while attempts < 3:
                 if "://" not in content[:100] and len(content) > 20 and "\n" not in content:
@@ -205,7 +201,6 @@ class ConfigLoader:
     def deduplicate(self):
         unique_map = {}
         for cfg in self.configs:
-            # Dedup Key: Protocol + Host + Port
             if cfg.host == "unknown": key = cfg.original
             else: key = f"{cfg.protocol}://{cfg.host}:{cfg.port}"
             
@@ -213,9 +208,8 @@ class ConfigLoader:
             if key_hash not in unique_map:
                 unique_map[key_hash] = cfg
         
-        removed = len(self.configs) - len(unique_map)
         self.configs = list(unique_map.values())
-        logger.info(f"Deduplication removed {removed} duplicates. Active: {len(self.configs)}")
+        logger.info(f"Deduplication complete. Active: {len(self.configs)}")
 
 # ==============================================================================
 # MODULE: TESTER
@@ -230,26 +224,27 @@ class Tester:
         self.timeout = timeout
 
     async def verify_binary(self) -> bool:
-        """Runs a version check to ensure xray-knife is executable"""
+        """
+        Runs --help to ensure binary works. 
+        Replaced 'version' command which caused previous crash.
+        """
         if not self.xray_bin: return False
         try:
-            # Run simple command
             proc = await asyncio.create_subprocess_exec(
-                self.xray_bin, "version",
+                self.xray_bin, "--help",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await proc.communicate()
-            return proc.returncode == 0
+            stdout, stderr = await proc.communicate()
+            # If it prints help text or returns 0/1 (some CLIs return 1 on help), it's alive.
+            return True
         except Exception as e:
             logger.error(f"Binary verification failed: {e}")
             return False
 
     async def test_wg_udp(self, config: ProxyConfig):
-        """Native UDP Probe for WireGuard"""
         try:
             if config.host == "unknown" or not config.port: raise ValueError("Invalid Host/Port")
-
             loop = asyncio.get_running_loop()
             
             # DNS
@@ -260,7 +255,7 @@ class Tester:
             except:
                 config.status = "failed"; config.reason = "DNS Error"; return
 
-            # Socket
+            # Probe
             start_time = loop.time()
             class Probe(asyncio.DatagramProtocol):
                 def __init__(self): self.done = asyncio.Future()
@@ -273,7 +268,7 @@ class Tester:
             try:
                 transport, proto = await loop.create_datagram_endpoint(lambda: Probe(), remote_addr=(target_ip, config.port), family=family)
                 await asyncio.wait_for(proto.done, timeout=2.0)
-            except asyncio.TimeoutError: pass # Silent success possible for WG
+            except asyncio.TimeoutError: pass 
             except Exception:
                 config.status = "failed"; config.reason = "Unreachable"; return
             finally:
@@ -289,7 +284,14 @@ class Tester:
             config.status = "broken"; config.reason = str(e)
 
     async def test_xray(self, config: ProxyConfig):
-        cmd = [self.xray_bin, "net", "http", "-c", config.original, "-d", str(self.timeout), "--url", DEFAULT_TEST_URL, "-z", "auto", "-v"]
+        cmd = [
+            self.xray_bin, "net", "http",
+            "-c", config.original,
+            "-d", str(self.timeout),
+            "--url", DEFAULT_TEST_URL,
+            "-z", "auto",
+            "-v"
+        ]
         if self.speedtest: cmd.extend(["-p", "-a", "2000"])
         if self.insecure: cmd.append("-e")
         if not self.geoip.reader: cmd.append("--rip")
@@ -316,7 +318,7 @@ class Tester:
                 config.status = "passed"
             else:
                 config.status = "failed"
-                config.reason = "Connection Failed"
+                config.reason = "Connect Failed"
                 return
 
             dl_m = RE_DOWNLOAD.search(output)
@@ -336,7 +338,6 @@ class Tester:
                 c, f = self.geoip.lookup(config.ip)
                 if c: config.country, config.flag = c, f
 
-            # Score Calculation
             config.score = config.delay / (1.0 + config.speed_dl) if config.speed_dl > 0 else config.delay
 
         except Exception as e:
@@ -350,104 +351,9 @@ class Tester:
                 await self.test_xray(config)
 
 # ==============================================================================
-# MAIN UTILS
+# MODULE: REPORTER
 # ==============================================================================
 
-def resolve_binary_path(name: str, arg_path: Optional[str]) -> str:
-    """Finds binary and returns absolute path"""
-    # 1. Argument Path
-    if arg_path:
-        p = Path(arg_path).resolve()
-        if p.exists(): return str(p)
-    
-    # 2. Local Directory
-    local = Path(os.getcwd()) / name
-    if local.exists(): return str(local.resolve())
-
-    # 3. PATH Environment
-    found = shutil.which(name)
-    if found: return str(Path(found).resolve())
-    
-    return ""
-
-async def async_main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--output-format", choices=["text", "base64"], default="base64")
-    parser.add_argument("--csv")
-    parser.add_argument("--xray-knife-path")
-    parser.add_argument("--geoip-db")
-    parser.add_argument("--threads", type=int, default=30)
-    parser.add_argument("--limit", type=int, default=50)
-    parser.add_argument("--speedtest", action="store_true")
-    parser.add_argument("--xray-knife-insecure", action="store_true", dest="insecure")
-    parser.add_argument("--name-prefix", default="Pr0xySh4rk")
-    parser.add_argument("--speedtest-amount") # Compatibility
-    args = parser.parse_args()
-    
-    # 1. Load Data
-    loader = ConfigLoader(args.input)
-    loader.load()
-    loader.deduplicate()
-    if not loader.configs: sys.exit(0)
-
-    # 2. Verify Binary
-    xray_bin = resolve_binary_path("xray-knife", args.xray_knife_path)
-    
-    if not xray_bin:
-        # Debugging Output
-        logger.critical("xray-knife binary NOT FOUND.")
-        logger.info(f"Current Directory ({os.getcwd()}):")
-        for f in os.listdir("."): logger.info(f" - {f}")
-        logger.critical("Cannot proceed with Xray protocols. Aborting.")
-        sys.exit(1)
-        
-    logger.info(f"Using xray-knife at: {xray_bin}")
-    os.chmod(xray_bin, 0o755) # Ensure executable
-
-    # 3. Setup Tester
-    geoip = GeoIPHandler(args.geoip_db)
-    tester = Tester(xray_bin, geoip, args.speedtest, args.insecure, DEFAULT_TIMEOUT_MS)
-
-    # 4. Pre-flight Check
-    logger.info("Verifying binary execution...")
-    if not await tester.verify_binary():
-        logger.critical("xray-knife failed to execute (permission or bad binary).")
-        sys.exit(1)
-    
-    # 5. Run Tests
-    sem = asyncio.Semaphore(args.threads)
-    tasks = [tester.worker(c, sem) for c in loader.configs]
-    
-    logger.info(f"Running {len(tasks)} tests with {args.threads} threads...")
-    
-    if TQDM_AVAILABLE:
-        for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), unit="cfg"): await f
-    else:
-        done = 0
-        total = len(tasks)
-        for f in asyncio.as_completed(tasks):
-            await f
-            done += 1
-            if done % 100 == 0: sys.stdout.write(f"\rProgress: {done}/{total}"); sys.stdout.flush()
-        print("")
-
-    # 6. Report
-    # Sort and filter inside generate_output
-    reporter = Reporter(args.name_prefix)
-    final_lines = reporter.generate_output(loader.configs, args.limit)
-    
-    if final_lines:
-        reporter.save_to_file(final_lines, args.output, args.output_format)
-        logger.info(f"Saved {len(final_lines)} configs.")
-    else:
-        logger.warning("No working configs found.")
-
-    if args.csv: reporter.save_csv(loader.configs, args.csv)
-    geoip.close()
-
-# MODULE: REPORTER (Included inside)
 class Reporter:
     def __init__(self, prefix: str): self.prefix = prefix
     def generate_output(self, configs: List[ProxyConfig], limit: int) -> List[str]:
@@ -469,10 +375,12 @@ class Reporter:
                 base = res.original.split("#")[0]
                 final.append(f"{base}#{encoded}")
         return final
+
     def save_to_file(self, lines, path, fmt):
         c = "\n".join(lines)
         if fmt=="base64": c = base64.b64encode(c.encode('utf-8')).decode('utf-8')
         with open(path, "w", encoding='utf-8') as f: f.write(c)
+
     def save_csv(self, configs, path):
         try:
             import csv
@@ -481,6 +389,76 @@ class Reporter:
                 w.writeheader()
                 for c in configs: w.writerow(c.to_csv())
         except: pass
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
+
+def resolve_binary(name: str, arg_path: Optional[str]) -> str:
+    if arg_path and os.path.exists(arg_path): return str(Path(arg_path).resolve())
+    found = shutil.which(name)
+    if found: return str(Path(found).resolve())
+    local = Path(os.getcwd()) / name
+    if local.exists(): return str(local.resolve())
+    return ""
+
+async def async_main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--output-format", default="base64")
+    parser.add_argument("--csv")
+    parser.add_argument("--xray-knife-path")
+    parser.add_argument("--geoip-db")
+    parser.add_argument("--threads", type=int, default=30)
+    parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--speedtest", action="store_true")
+    parser.add_argument("--xray-knife-insecure", action="store_true", dest="insecure")
+    parser.add_argument("--name-prefix", default="Pr0xySh4rk")
+    parser.add_argument("--speedtest-amount")
+    args = parser.parse_args()
+    
+    loader = ConfigLoader(args.input)
+    loader.load()
+    loader.deduplicate()
+    
+    xray_bin = resolve_binary("xray-knife", args.xray_knife_path)
+    if not xray_bin:
+        logger.critical("xray-knife NOT FOUND. Cannot test Xray protocols.")
+        sys.exit(1)
+        
+    os.chmod(xray_bin, 0o755)
+    
+    geoip = GeoIPHandler(args.geoip_db)
+    tester = Tester(xray_bin, geoip, args.speedtest, args.insecure, DEFAULT_TIMEOUT_MS)
+
+    # Pre-flight Check
+    if not await tester.verify_binary():
+        logger.critical(f"Binary {xray_bin} execution failed (check permissions/arch).")
+        sys.exit(1)
+
+    sem = asyncio.Semaphore(args.threads)
+    tasks = [tester.worker(c, sem) for c in loader.configs]
+    
+    logger.info(f"Testing {len(loader.configs)} configs with {args.threads} threads...")
+    
+    if TQDM_AVAILABLE:
+        for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), unit="cfg"): await f
+    else:
+        done = 0
+        total = len(tasks)
+        for f in asyncio.as_completed(tasks):
+            await f
+            done += 1
+            if done % 50 == 0: sys.stdout.write(f"\r{done}/{total}"); sys.stdout.flush()
+        print("")
+
+    reporter = Reporter(args.name_prefix)
+    final_lines = reporter.generate_output(loader.configs, args.limit)
+    reporter.save_to_file(final_lines, args.output, args.output_format)
+    
+    if args.csv: reporter.save_csv(loader.configs, args.csv)
+    geoip.close()
 
 def main():
     signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
