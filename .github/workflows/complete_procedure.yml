@@ -2,7 +2,6 @@ name: Complete Pr0xySh4rk Update
 
 on:
   schedule:
-    # Runs every 6 hours
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
@@ -12,151 +11,97 @@ permissions:
 jobs:
   update-proxies:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # 6 hours max runtime
+    timeout-minutes: 360
 
     env:
-      # Use a reliable mirror for GeoIP as MaxMind requires a license key now
       GEOIP_URL: "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
-      # Configuration
       CONFIG_LIMIT: 50
-      THREADS: 50
+      THREADS: 40  # Lowered slightly for stability
       SPEEDTEST_ENABLED: "true"
 
     steps:
-      # 1. Checkout Code
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Setup Python Environment
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
 
-      # 3. Install Python Dependencies
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            # Install manually if file missing
-            pip install requests urllib3 tqdm python-dotenv geoip2
-          fi
+          pip install requests urllib3 tqdm python-dotenv geoip2
 
-      # 4. Run Collector Script
       - name: Run Collector (main.py)
-        env:
-          # Optional: GitHub Token for API Search (rate limit avoidance)
-          API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Starting Collection..."
           python main.py
-          
-          # Verify output
           if [ ! -s collected_configs.txt ]; then
-            echo "::error::Collector failed. 'collected_configs.txt' is empty or missing."
+            echo "::error::Collector failed."
             exit 1
           fi
-          echo "Collection successful. Found $(wc -l < collected_configs.txt) configs."
 
-      # 5. Install External Tools (Xray-Knife & GeoIP)
-      - name: Install Xray-Knife and GeoIP
+      - name: Install Tools (Xray-Core, Xray-Knife, GeoIP)
         run: |
-          # --- Install GeoIP DB ---
-          echo "Downloading GeoIP Database..."
+          # 1. GeoIP
           wget -q -O Country.mmdb "${{ env.GEOIP_URL }}"
-          if [ ! -f Country.mmdb ]; then
-            echo "::error::Failed to download GeoIP database."
-            exit 1
-          fi
 
-          # --- Install Xray-Knife ---
-          echo "Fetching latest xray-knife release info..."
+          # 2. Xray-Core (Required engine for xray-knife)
+          echo "Installing Xray-Core..."
+          wget -q -O xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+          unzip -o xray.zip -d xray_core
+          mv xray_core/xray .
+          chmod +x xray
+          rm -rf xray_core xray.zip
+
+          # 3. Xray-Knife (The tester)
+          echo "Installing Xray-Knife..."
           LATEST_TAG=$(curl -sL "https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest" | jq -r ".tag_name")
-          
-          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
-             echo "::error::Failed to get latest release tag."
-             exit 1
-          fi
-          
-          echo "Downloading xray-knife ${LATEST_TAG}..."
-          DOWNLOAD_URL="https://github.com/lilendian0x00/xray-knife/releases/download/${LATEST_TAG}/Xray-knife-linux-64.zip"
-          
-          wget -q -O xray-knife.zip "$DOWNLOAD_URL"
-          
-          # Unzip into a temp folder to avoid file conflicts
-          unzip -o xray-knife.zip -d temp_bin
-          
-          # Find the binary regardless of internal folder structure
-          FOUND_BIN=$(find temp_bin -type f -name "xray-knife" | head -n 1)
-          
-          if [ -z "$FOUND_BIN" ]; then
-             echo "::error::Could not find 'xray-knife' binary in zip file."
-             ls -R temp_bin
-             exit 1
-          fi
-          
-          # Move to current directory
-          mv "$FOUND_BIN" ./xray-knife
-          chmod +x ./xray-knife
-          
-          # Cleanup
-          rm -rf temp_bin xray-knife.zip
-          
-          # Verify Execution
-          echo "Verifying binary..."
-          ./xray-knife --help > /dev/null && echo "xray-knife is working." || exit 1
+          wget -q -O knife.zip "https://github.com/lilendian0x00/xray-knife/releases/download/${LATEST_TAG}/Xray-knife-linux-64.zip"
+          unzip -o knife.zip -d knife_temp
+          # Find binary recursively
+          KNIFE_BIN=$(find knife_temp -type f -name "xray-knife" | head -n 1)
+          mv "$KNIFE_BIN" ./xray-knife
+          chmod +x xray-knife
+          rm -rf knife_temp knife.zip
 
-      # 6. Run Processor / Tester
+          # 4. Verify
+          ./xray -version
+          ./xray-knife --help > /dev/null && echo "Tools Ready"
+
       - name: Run Processor (Pr0xySh4rk.py)
         run: |
-          # Construct arguments
-          ARGS=(
-            "--input" "collected_configs.txt"
-            "--output" "Pr0xySh4rk_SubBase64.txt"
-            "--output-format" "base64"
-            "--limit" "${{ env.CONFIG_LIMIT }}"
-            "--threads" "${{ env.THREADS }}"
-            "--geoip-db" "Country.mmdb"
-            "--xray-knife-path" "./xray-knife"
-            "--xray-knife-insecure"
-            "--csv" "report.csv"
-          )
+          # We add the current dir to PATH so xray-knife can find xray executable
+          export PATH=$PATH:$(pwd)
           
-          if [ "${{ env.SPEEDTEST_ENABLED }}" == "true" ]; then
-            ARGS+=("--speedtest")
-          fi
-          
-          echo "Running Pr0xySh4rk.py..."
-          python Pr0xySh4rk.py "${ARGS[@]}"
+          python Pr0xySh4rk.py \
+            --input collected_configs.txt \
+            --output Pr0xySh4rk_SubBase64.txt \
+            --output-format base64 \
+            --limit ${{ env.CONFIG_LIMIT }} \
+            --threads ${{ env.THREADS }} \
+            --geoip-db Country.mmdb \
+            --xray-knife-path ./xray-knife \
+            --xray-knife-insecure \
+            --speedtest \
+            --csv report.csv
 
-      # 7. Commit and Push Results
       - name: Commit and Push
         if: success()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          # Add output files
           git add Pr0xySh4rk_SubBase64.txt
           
-          # Optionally add CSV report
-          # git add report.csv
+          # Clean temp files
+          rm -f collected_configs.txt Country.mmdb xray xray-knife report.csv
           
-          # Cleanup temporary files before checking status
-          # (We don't want to commit these)
-          rm -f collected_configs.txt Country.mmdb xray-knife report.csv
-          
-          # Check for changes
           if git diff --staged --quiet; then
-            echo "No changes to commit."
+            echo "No changes."
           else
-            COMMIT_MSG="Update Proxies: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-            git commit -m "$COMMIT_MSG"
-            
-            # Robust Push with Rebase (prevents conflicts)
+            git commit -m "Update Proxies: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
             git pull --rebase --autostash
             git push
           fi
