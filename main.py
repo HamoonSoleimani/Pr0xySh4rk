@@ -1,19 +1,51 @@
+# -*- coding: utf-8 -*-
 import requests
 import re
 import time
 import base64
 import os
+import logging
 import concurrent.futures
-
-# Get token from GitHub Secrets
-GITHUB_TOKEN = os.getenv("API_TOKEN")
-OUTPUT_FILE = "collected_configs.txt"
-
-# Timeout for each request (seconds)
-TIMEOUT = 20
+import random
+import json
+from urllib.parse import urlparse, unquote
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 
 # ==============================================================================
-# 1. MASSIVE LIST OF DIRECT SOURCES
+# CONFIGURATION
+# ==============================================================================
+
+# Setup Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Output
+OUTPUT_FILE = "collected_configs.txt"
+
+# Networking
+TIMEOUT = 20  # Seconds
+RETRIES = 3
+BACKOFF_FACTOR = 0.5
+MAX_WORKERS = 40  # High concurrency for I/O bound tasks
+
+# GitHub Token (Optional but recommended for Search)
+GITHUB_TOKEN = os.getenv("API_TOKEN") or os.getenv("GITHUB_TOKEN")
+
+# Headers Pool (Random rotation to avoid simple blocking)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
+]
+
+# ==============================================================================
+# SOURCES
 # ==============================================================================
 DIRECT_URLS = [
     # --- F0rc3Run ---
@@ -112,7 +144,7 @@ DIRECT_URLS = [
     "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/refs/heads/main/githubmirror/1.txt",
     "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/refs/heads/main/githubmirror/10.txt",
 
-    # --- Others Found in List ---
+    # --- Mixed / Others ---
     "https://vpny.online/VPNy.json",
     "https://raw.githubusercontent.com/Firmfox/Proxify/refs/heads/main/v2ray_configs/mixed/subscription-1.txt",
     "https://raw.githubusercontent.com/LalatinaHub/Mineral/refs/heads/master/result/nodes",
@@ -162,157 +194,276 @@ DIRECT_URLS = [
     "https://clash.221207.xyz/pubclashyaml",
     "https://raw.githubusercontent.com/SANYIMOE/VPN-free/master/sub",
     
-    # --- Specific API Links ---
+    # --- API Links ---
     "http://subxfxssr.xfxvpn.me/api/v1/client/subscribe?token=0d5306ab80abb3f2012edf9169f5f00a",
     "https://sub.pmsub.me/base64"
 ]
 
-def get_headers():
+# ==============================================================================
+# LOGIC
+# ==============================================================================
+
+def get_session():
+    """Creates a requests Session with robust retry logic."""
+    session = requests.Session()
+    retry = Retry(
+        total=RETRIES,
+        read=RETRIES,
+        connect=RETRIES,
+        backoff_factor=BACKOFF_FACTOR,
+        status_forcelist=[500, 502, 503, 504, 429],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+def get_random_headers():
     return {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive"
     }
 
-def extract_configs(text):
+def normalize_github_url(url):
+    """Converts GitHub blob URLs to raw user content URLs."""
+    if "github.com" in url and "/blob/" in url:
+        return url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+    return url
+
+def clean_base64(text):
+    """
+    Cleans text to be a valid base64 string.
+    Removes whitespace, adds padding.
+    """
+    text = re.sub(r'\s+', '', text)
+    missing_padding = len(text) % 4
+    if missing_padding:
+        text += '=' * (4 - missing_padding)
+    return text
+
+def extract_configs_from_text(text):
+    """
+    Recursively extracts configs from text.
+    Handles:
+    1. Direct protocol links (vmess://, etc.)
+    2. Standard Base64 encoded subscriptions.
+    3. URL-Safe Base64 encoded subscriptions.
+    4. Mixed content (some text, some base64).
+    """
     configs = set()
     
-    # EXPANDED PROTOCOLS: vmess, vless, trojan, ss, ssr, hy2, hysteria2, hysteria, tuic, juicity, wireguard
-    # Added '/' to the character class to correctly capture paths and base64 slashes
-    pattern = r'(?:vmess|vless|trojan|ss|ssr|hy2|hysteria2|hysteria|tuic|juicity|wireguard)://[a-zA-Z0-9\+\=\-\_\.\?\&@\#%:/]+'
+    # Regex to capture all modern proxy protocols including WireGuard variants
+    # Covers: vmess, vless, trojan, ss, ssr, tuic, hysteria, hy2, wg, warp, juicity, dtech, nekoray
+    proto_pattern = r'(?:vmess|vless|trojan|ss|ssr|hy2|hysteria2|hysteria|tuic|juicity|dtech|nekoray|wireguard|wg|warp)://[a-zA-Z0-9\+\=\-\_\.\?\&@\#%:/]+'
     
-    # 1. Raw Regex
-    matches = re.findall(pattern, text)
-    for match in matches:
-        configs.add(match)
+    # 1. Direct Scan
+    matches = re.findall(proto_pattern, text)
+    for m in matches:
+        configs.add(m.strip())
 
-    # 2. Base64 Decode
-    try:
-        # Basic cleanup
-        cleaned_text = "".join(text.split())
-        
-        # Heuristic: if it looks like a typical URL list (http...), skip deep decode
-        # Only decode if it DOES NOT start with http/https
-        if not cleaned_text.startswith("http") and len(cleaned_text) > 20:
-            missing_padding = len(cleaned_text) % 4
-            if missing_padding:
-                cleaned_text += '=' * (4 - missing_padding)
+    # 2. Base64 Decode Attempt
+    # Split text by newlines or look for large chunks that might be base64
+    # We try to decode the WHOLE text first, if that fails, we check lines.
+    
+    candidates = [text] # Treat whole text as candidate
+    
+    # If text is multiline, also treat each non-empty line as a potential base64 string
+    # (Many subs are just a list of base64 strings)
+    if '\n' in text:
+        candidates.extend([line.strip() for line in text.split('\n') if len(line.strip()) > 20])
+
+    for candidate in candidates:
+        candidate_clean = clean_base64(candidate)
+        try:
+            # Try Standard Base64
+            decoded_bytes = base64.b64decode(candidate_clean, validate=True)
+            try:
+                decoded_str = decoded_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    decoded_str = decoded_bytes.decode('latin-1')
+                except:
+                    continue # Not text
             
-            decoded_bytes = base64.b64decode(cleaned_text)
-            decoded_str = decoded_bytes.decode('utf-8', errors='ignore')
-            
-            decoded_matches = re.findall(pattern, decoded_str)
-            for dm in decoded_matches:
-                configs.add(dm)
-    except Exception:
-        pass
+            # Recursive scan on decoded text
+            decoded_configs = re.findall(proto_pattern, decoded_str)
+            if decoded_configs:
+                for dc in decoded_configs:
+                    configs.add(dc.strip())
+            elif "\n" in decoded_str: 
+                 # Maybe it's a list of links that regex didn't catch or need second pass
+                 pass
+                 
+        except Exception:
+            pass
 
     return configs
 
-def fetch_and_extract(url):
-    """Helper function for thread pool"""
+def parse_telegram_preview(html_content):
+    """
+    Extracts configs from the HTML preview of a public Telegram channel.
+    Targeting 'tgme_widget_message_text' div content.
+    """
     try:
-        # Fix GitHub blob links
-        if "github.com" in url and "/blob/" in url:
-            url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+        # Simple regex scrape for content inside message bubbles
+        # This avoids needing BeautifulSoup dependency
+        message_pattern = r'class="tgme_widget_message_text[^"]*">(.*?)</div>'
+        messages = re.findall(message_pattern, html_content, re.DOTALL)
+        
+        combined_text = ""
+        for msg in messages:
+            # Clean HTML tags (br, etc)
+            clean_msg = re.sub(r'<[^>]+>', '\n', msg)
+            combined_text += clean_msg + "\n"
             
-        response = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
+        return extract_configs_from_text(combined_text)
+    except Exception as e:
+        logger.error(f"Error parsing Telegram HTML: {e}")
+        return set()
+
+def fetch_source(url):
+    """
+    Worker function to fetch and extract from a single URL.
+    """
+    url = normalize_github_url(url)
+    session = get_session()
+    
+    try:
+        response = session.get(url, headers=get_random_headers(), timeout=TIMEOUT)
         
         if response.status_code == 200:
-            found = extract_configs(response.text)
-            if found:
-                print(f"    [+] Found {len(found)} configs from {url.split('/')[-1]}")
-                return found
-    except Exception:
-        pass
+            content = response.text
+            
+            # Special handling for Telegram web previews
+            if "t.me/s/" in url:
+                configs = parse_telegram_preview(content)
+                logger.info(f"Fetched Telegram {url}: found {len(configs)}")
+                return configs
+                
+            configs = extract_configs_from_text(content)
+            if configs:
+                logger.info(f"Fetched {url}: found {len(configs)}")
+                return configs
+            else:
+                logger.debug(f"Fetched {url}: No configs found.")
+        else:
+            logger.warning(f"Failed {url}: HTTP {response.status_code}")
+            
+    except Exception as e:
+        logger.warning(f"Error fetching {url}: {str(e)}")
+        
     return set()
 
-def scrape_direct_repos(all_configs):
-    print(f"\n[*] Scraping {len(DIRECT_URLS)} high-quality sources (Concurrent)...")
-    
-    # 25 workers to speed up the huge list
-    with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
-        results = executor.map(fetch_and_extract, DIRECT_URLS)
-        
-    for result in results:
-        if result:
-            all_configs.update(result)
-
-def search_github(all_configs):
+def search_github_code(all_configs):
+    """
+    Uses GitHub Code Search API to find fresh text files containing proxy protocols.
+    Handles Rate Limits.
+    """
     if not GITHUB_TOKEN:
-        print("[-] Error: API_TOKEN is missing.")
+        logger.warning("No GITHUB_TOKEN provided. Skipping GitHub API Search.")
         return
 
-    # Smart queries covering all protocols
-    search_queries = [
-        'filename:Sub extension:txt',
-        'filename:v2ray extension:txt',
-        'filename:config extension:txt',
-        'filename:proxy extension:txt',
-        '"vmess://" extension:txt',
-        '"vless://" extension:txt',
-        '"ss://" extension:txt',
-        '"trojan://" extension:txt',
-        '"tuic://" extension:txt',
-        '"hysteria2://" extension:txt'
-    ]
-
-    print(f"\n[*] Searching GitHub Code (Sorted by Recently Indexed)...")
+    logger.info("Starting GitHub Code Search...")
     
-    for query in search_queries:
-        print(f"[*] Querying: {query}")
-        page = 1
-        # Limit to 2 pages to keep it fast
-        while page <= 2: 
-            url = f"https://api.github.com/search/code?q={query}&sort=indexed&order=desc&per_page=20&page={page}"
-            
-            try:
-                response = requests.get(url, headers=get_headers())
-                
-                if response.status_code == 403:
-                    print("[-] GitHub Search Rate limit hit. Skipping search.")
-                    break 
-                
-                items = response.json().get('items', [])
-                if not items:
-                    break 
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Pr0xySh4rk-Collector"
+    }
+    
+    # Specific queries to target files
+    queries = [
+        'filename:sub "vmess://"',
+        'filename:config "vless://"',
+        'filename:proxy "trojan://"',
+        'extension:txt "tuic://"',
+        'extension:txt "hysteria2://"',
+        '"ss://" extension:txt'
+    ]
+    
+    session = get_session()
 
+    for query in queries:
+        page = 1
+        while page <= 2: # Limit depth to save API quota and time
+            search_url = f"https://api.github.com/search/code?q={query}&sort=indexed&order=desc&per_page=20&page={page}"
+            try:
+                resp = session.get(search_url, headers=headers, timeout=10)
+                
+                if resp.status_code == 403 or resp.status_code == 429:
+                    logger.warning("GitHub API Rate Limit Exceeded. Stopping search.")
+                    return # Stop completely to avoid ban
+                
+                if resp.status_code != 200:
+                    logger.error(f"GitHub API Error {resp.status_code}")
+                    break
+                    
+                items = resp.json().get('items', [])
+                if not items:
+                    break
+                    
                 for item in items:
-                    raw_url = item.get('html_url').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
-                    try:
-                        file_resp = requests.get(raw_url, timeout=5)
-                        if file_resp.status_code == 200:
-                            found = extract_configs(file_resp.text)
-                            if found:
-                                print(f"    [Search] Found {len(found)} in {item['name']}")
-                                all_configs.update(found)
-                    except Exception:
-                        pass
+                    raw_url = item.get('html_url', '').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
+                    if raw_url:
+                        found = fetch_source(raw_url)
+                        if found:
+                            all_configs.update(found)
+                            
                 page += 1
-                time.sleep(1) 
+                time.sleep(2) # Be polite to API
+                
             except Exception as e:
-                print(f"[-] Search Error: {e}")
+                logger.error(f"GitHub Search Error: {e}")
                 break
 
-def save_configs(configs):
-    if not configs:
-        print("[-] No configs found.")
+# ==============================================================================
+# MAIN EXECUTION
+# ==============================================================================
+
+def main():
+    start_time = time.time()
+    final_configs = set()
+
+    # 1. Scrape Direct URLs (Concurrent)
+    logger.info(f"Starting Scrape of {len(DIRECT_URLS)} direct sources...")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_url = {executor.submit(fetch_source, url): url for url in DIRECT_URLS}
+        
+        for future in concurrent.futures.as_completed(future_to_url):
+            try:
+                data = future.result()
+                if data:
+                    final_configs.update(data)
+            except Exception as exc:
+                logger.error(f"Worker exception: {exc}")
+
+    logger.info(f"Direct scrape complete. Current total: {len(final_configs)}")
+
+    # 2. Dynamic GitHub Search
+    search_github_code(final_configs)
+
+    # 3. Save Output
+    if not final_configs:
+        logger.error("No configs collected!")
+        # Create empty file to avoid pipeline errors
         open(OUTPUT_FILE, "w").close()
         return
 
-    print(f"\n[SUCCESS] Total unique configs extracted: {len(configs)}")
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for conf in configs:
-            f.write(conf + "\n")
+    logger.info(f"Saving {len(final_configs)} unique configs to {OUTPUT_FILE}...")
+    
+    try:
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            for config in final_configs:
+                f.write(config + "\n")
+        logger.info("Write successful.")
+    except Exception as e:
+        logger.error(f"Failed to write output file: {e}")
+
+    elapsed = time.time() - start_time
+    logger.info(f"Collection finished in {elapsed:.2f} seconds.")
 
 if __name__ == "__main__":
-    final_configs = set()
-    
-    # 1. Parallel scrape of the massive hardcoded list
-    scrape_direct_repos(final_configs)
-    
-    # 2. Dynamic GitHub Search (Backfill with fresh random uploads)
-    search_github(final_configs)
-    
-    # 3. Save to file
-    save_configs(final_configs)
+    main()
