@@ -16,21 +16,18 @@ def get_headers():
 
 def extract_configs(text):
     configs = set()
-    # Regex that matches vmess/vless including allowed special chars
-    # We stop at whitespace to ensure we get the clean link
-    pattern = r'(vmess|vless|trojan|ss|ssr)://[a-zA-Z0-9\+\=\-\_\.\?\&@\#%:]+'
+    # FIXED REGEX: Added (?:...) to prevent capturing just the protocol
+    pattern = r'(?:vmess|vless|trojan|ss|ssr)://[a-zA-Z0-9\+\=\-\_\.\?\&@\#%:]+'
     
-    # 1. Raw Regex (Finds links in plain text)
+    # 1. Raw Regex
     matches = re.findall(pattern, text)
     for match in matches:
         configs.add(match)
 
-    # 2. Base64 Decode (Finds links hidden in Base64 strings)
+    # 2. Base64 Decode
     try:
-        # Remove newlines and spaces to get clean b64 string
         cleaned_text = "".join(text.split())
         if len(cleaned_text) > 20:
-            # Fix padding
             missing_padding = len(cleaned_text) % 4
             if missing_padding:
                 cleaned_text += '=' * (4 - missing_padding)
@@ -47,14 +44,7 @@ def extract_configs(text):
     return configs
 
 def scrape_direct_repos(all_configs):
-    """
-    Directly scrapes known high-quality repos without using Search API.
-    This guarantees results even if Search is lagging.
-    """
     print(f"\n[*] Scraping specific known repositories...")
-    
-    # List of raw URLs to file that are updated frequently
-    # You can add more here if you find other good repos
     direct_urls = [
         "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Sub11.txt",
         "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Sub1.txt",
@@ -63,7 +53,6 @@ def scrape_direct_repos(all_configs):
         "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
         "https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/All_Configs_Sub.txt"
     ]
-
     for url in direct_urls:
         try:
             print(f"    --> Fetching: {url}")
@@ -73,16 +62,14 @@ def scrape_direct_repos(all_configs):
                 if found:
                     print(f"        [+] Found {len(found)} configs")
                     all_configs.update(found)
-        except Exception as e:
-            print(f"        [!] Failed: {e}")
+        except Exception:
+            pass
 
 def search_github(all_configs):
     if not GITHUB_TOKEN:
         print("[-] Error: API_TOKEN is missing.")
         return
 
-    # REMOVED the 'pushed:>' date filter. 
-    # We now rely on 'sort=indexed' to get the freshest data.
     search_queries = [
         'filename:Sub extension:txt',
         'filename:v2ray extension:txt',
@@ -91,25 +78,21 @@ def search_github(all_configs):
         '"vless://" extension:txt'
     ]
 
-    print(f"\n[*] Searching GitHub Code (Sorted by Recently Indexed)...")
+    print(f"\n[*] Searching GitHub Code...")
     
     for query in search_queries:
         print(f"[*] Querying: {query}")
-        # Only check the first 2 pages of "Recently Indexed" to keep it fast and fresh
         page = 1
         while page <= 2: 
             url = f"https://api.github.com/search/code?q={query}&sort=indexed&order=desc&per_page=15&page={page}"
-            
             try:
                 response = requests.get(url, headers=get_headers())
-                
                 if response.status_code == 403:
-                    print("[-] Rate limit hit. Moving to next step.")
+                    print("[-] Rate limit hit.")
                     break 
                 
                 items = response.json().get('items', [])
-                if not items:
-                    break 
+                if not items: break 
 
                 for item in items:
                     raw_url = item.get('html_url').replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
@@ -124,13 +107,12 @@ def search_github(all_configs):
                         pass
                 page += 1
                 time.sleep(1.5) 
-            except Exception as e:
-                print(f"[-] Error: {e}")
+            except Exception:
                 break
 
 def save_configs(configs):
     if not configs:
-        print("[-] No configs found anywhere.")
+        print("[-] No configs found.")
         open(OUTPUT_FILE, "w").close()
         return
 
@@ -140,14 +122,7 @@ def save_configs(configs):
             f.write(conf + "\n")
 
 if __name__ == "__main__":
-    # Use a set to store configs to automatically handle duplicates
     final_configs = set()
-    
-    # 1. Search GitHub broadly
     search_github(final_configs)
-    
-    # 2. Scrape specific direct URLs (Guaranteed results)
     scrape_direct_repos(final_configs)
-    
-    # 3. Save
     save_configs(final_configs)
