@@ -1,49 +1,4 @@
-name: Complete Pr0xySh4rk Update
-
-on:
-  schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  update-proxies:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    env:
-      XRAY_KNIFE_VERSION: "v1.5.6" # Set target version or use 'latest' logic in step
-      GEOIP_URL: "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
-
-      - name: Install Python Dependencies
-        run: |
-          pip install -r requirements.txt
-
-      # ----------------------------------------------------------------
-      # STEP 1: COLLECT CONFIGS
-      # ----------------------------------------------------------------
-      - name: Run Collector (main.py)
-        run: |
-          echo "Running Collector..."
-          python main.py
-          if [ ! -s collected_configs.txt ]; then
-            echo "::error::Collector failed to find configs."
-            exit 1
-          fi
-
-      # ----------------------------------------------------------------
+# ----------------------------------------------------------------
       # STEP 2: SETUP TOOLS (Xray-Knife & GeoIP)
       # ----------------------------------------------------------------
       - name: Install Tools
@@ -52,52 +7,22 @@ jobs:
           echo "Downloading GeoIP Database..."
           wget -q -O Country.mmdb "${{ env.GEOIP_URL }}"
 
-          # 2. Download Xray-Knife (Dynamic Latest Release)
+          # 2. Download Xray-Knife (Fixed)
           echo "Fetching latest xray-knife..."
           LATEST_TAG=$(curl -sL "https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest" | jq -r ".tag_name")
           DOWNLOAD_URL="https://github.com/lilendian0x00/xray-knife/releases/download/${LATEST_TAG}/Xray-knife-linux-64.zip"
           
-          wget -q -O xray-knife.zip "$DOWNLOAD_URL"
-          unzip -o xray-knife.zip
+          # Download to temp file
+          wget -q -O xray-temp.zip "$DOWNLOAD_URL"
           
-          # Find and move executable to current path
-          find . -name "xray-knife" -type f -exec mv {} . \;
+          # Unzip into specific directory to avoid conflicts
+          unzip -o xray-temp.zip -d xray_bin
+          
+          # Move binary out and cleanup
+          mv xray_bin/xray-knife .
+          rm -rf xray_bin xray-temp.zip
+          
           chmod +x xray-knife
-          ./xray-knife version || echo "xray-knife installed"
-
-      # ----------------------------------------------------------------
-      # STEP 3: PARSE, TEST, FILTER, SAVE
-      # ----------------------------------------------------------------
-      - name: Run Processor (Pr0xySh4rk.py)
-        run: |
-          python Pr0xySh4rk.py \
-            --input collected_configs.txt \
-            --output Pr0xySh4rk_SubBase64.txt \
-            --output-format base64 \
-            --limit 50 \
-            --threads 50 \
-            --speedtest \
-            --geoip-db Country.mmdb \
-            --xray-knife-path ./xray-knife \
-            --xray-knife-insecure
-
-      # ----------------------------------------------------------------
-      # STEP 4: COMMIT RESULTS
-      # ----------------------------------------------------------------
-      - name: Commit and Push
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
           
-          git add Pr0xySh4rk_SubBase64.txt
-          
-          # Clean up temp files to not commit them
-          git rm --cached collected_configs.txt || true
-          rm collected_configs.txt Country.mmdb xray-knife xray-knife.zip || true
-          
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "Update Proxies: $(date -u +'%Y-%m-%d %H:%M:%S')"
-            git push
-          fi
+          # Quick verification command to ensure it's runnable
+          ./xray-knife --help > /dev/null && echo "xray-knife installed and runnable"
