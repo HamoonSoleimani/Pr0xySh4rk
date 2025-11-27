@@ -2,12 +2,11 @@ name: Daily V2Ray Scraper
 
 on:
   schedule:
-    # Runs at 00:00 UTC every day
     - cron: '0 0 * * *'
-  workflow_dispatch: # Allows you to run it manually from the Actions tab for testing
+  workflow_dispatch:
 
 permissions:
-  contents: write # Important: Allows the action to push changes to the repo
+  contents: write
 
 jobs:
   scrape_and_commit:
@@ -29,7 +28,6 @@ jobs:
 
       - name: Run Scraper Script
         env:
-          # This pulls the secret you set in repository settings
           API_TOKEN: ${{ secrets.API_TOKEN }} 
         run: python main.py
 
@@ -38,11 +36,13 @@ jobs:
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           
-          # Check if there are changes
-          if git diff --quiet collected_configs.txt; then
-            echo "No changes detected in configs. Skipping commit."
+          # Force add the file to staging so git knows about it
+          git add collected_configs.txt
+          
+          # Check if there are changes in the staging area
+          if git diff --staged --quiet; then
+            echo "No changes detected. Skipping commit."
           else
-            git add collected_configs.txt
             git commit -m "Update configs: $(date -u +'%Y-%m-%d')"
             git push
           fi
