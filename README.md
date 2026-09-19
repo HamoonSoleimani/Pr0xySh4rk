@@ -86,16 +86,3 @@ per-config diagnostic dump, etc).
 - The workflow schedule is set in
   `.github/workflows/complete_procedure.yml` (`cron: '0 */6 * * *'`, every 6
   hours by default).
-
-## Notes on this rewrite
-
-This version replaces the previous implementation, which shelled out to a
-`xray-knife net http` subcommand that no longer exists in current
-`xray-knife` releases (the CLI moved to a single batch-oriented `http`
-command) - so the old tester would fail outright against any up-to-date
-`xray-knife` binary. It also resolved the "latest" release via
-`api.github.com` + `jq`, which is unauthenticated-rate-limited to 60
-requests/hour and fails silently under load. Both are fixed here: the
-tester is rebuilt around the current `xray-knife http` engine, and releases
-are fetched via GitHub's `releases/latest/download/<asset>` redirect, which
-doesn't touch the API at all.
