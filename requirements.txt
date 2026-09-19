@@ -1,5 +1,2 @@
-requests
-urllib3
-tqdm
-python-dotenv
-geoip2
+requests>=2.31,<3
+urllib3>=2.0,<3

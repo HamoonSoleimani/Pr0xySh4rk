@@ -1,419 +1,424 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Pr0xySh4rk tester + reporter
+=============================
+
+Takes a raw list of proxy config links (one per line, as produced by
+main.py), tests every one of them for real with xray-knife's built-in
+batch HTTP tester (xray-knife >= v11), and writes out only the
+healthiest configs per protocol as a subscription file (plain text or
+base64), renamed with a small info tag ([PROTOCOL][rank][flag][speed][delay]).
+
+Why this shells out to `xray-knife http -f ... -x csv` instead of
+driving xray-core directly, one config at a time, the way older
+versions of this script did: modern xray-knife (v11+) already has a
+concurrent batch tester with TCP pre-screening, speed testing, retry
+handling, and structured CSV output built in - re-implementing that in
+Python would just be worse and slower. This script's job is purely to
+feed it a clean, de-duplicated input list and turn its CSV output into
+a ranked subscription.
+"""
+
+from __future__ import annotations
 
 import argparse
-import asyncio
 import base64
 import csv
-import hashlib
 import logging
 import os
-import re
 import shutil
-import signal
-import socket
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple, Optional, Set
+from typing import Dict, List, Optional
 
-# ==============================================================================
-# DEPENDENCIES
-# ==============================================================================
-try:
-    import geoip2.database
-    GEOIP_AVAILABLE = True
-except ImportError:
-    GEOIP_AVAILABLE = False
-
-try:
-    from tqdm.asyncio import tqdm
-    TQDM_AVAILABLE = True
-except ImportError:
-    TQDM_AVAILABLE = False
-
-# ==============================================================================
-# CONSTANTS
-# ==============================================================================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s | %(levelname)8s | %(message)s',
-    datefmt='%H:%M:%S'
+    format="%(asctime)s | %(levelname)7s | %(message)s",
+    datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("Pr0xySh4rk")
+log = logging.getLogger("tester")
 
-RE_ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-RE_DELAY = re.compile(r"(?:Real Delay|Latency|RTT)\s*[:=]\s*(\d+)\s*ms", re.IGNORECASE)
-RE_DOWNLOAD = re.compile(r"Downloaded.*?Speed\s*[:=]\s*([\d\.]+)\s*([KMG]?)bps", re.IGNORECASE)
-RE_IP_LOC = re.compile(r"ip=(?P<ip>[\d\.a-fA-F:]+).*?loc=(?P<loc>[A-Z]{2})", re.IGNORECASE | re.DOTALL)
+DEFAULT_TEST_URL = "https://cloudflare.com/cdn-cgi/trace"  # required for ip/location to populate
+PASSED_STATUSES = {"passed"}
+SEMI_PASSED_STATUSES = {"semi-passed"}
 
-COUNTRY_FLAGS = {
-    "US": "🇺🇸", "DE": "🇩🇪", "NL": "🇳🇱", "GB": "🇬🇧", "FR": "🇫🇷", "CA": "🇨🇦", "JP": "🇯🇵",
-    "SG": "🇸🇬", "HK": "🇭🇰", "AU": "🇦🇺", "CH": "🇨🇭", "SE": "🇸🇪", "FI": "🇫🇮", "NO": "🇳🇴",
-    "IE": "🇮🇪", "IT": "🇮🇹", "ES": "🇪🇸", "PL": "🇵🇱", "RO": "🇷🇴", "TR": "🇹🇷", "RU": "🇷🇺",
-    "UA": "🇺🇦", "IR": "🇮🇷", "AE": "🇦🇪", "CN": "🇨🇳", "IN": "🇮🇳", "BR": "🇧🇷", "ZA": "🇿🇦",
-    "KR": "🇰🇷", "TW": "🇹🇼", "VN": "🇻🇳", "ID": "🇮🇩", "MY": "🇲🇾", "TH": "🇹🇭", "KZ": "🇰🇿",
-    "SA": "🇸🇦", "EG": "🇪🇬", "IL": "🇮🇱", "PK": "🇵🇰", "PH": "🇵🇭"
-}
-DEFAULT_FLAG = "🚩"
-DEFAULT_TEST_URL = "https://cp.cloudflare.com/"
-DEFAULT_TIMEOUT_MS = 8000  # Increased timeout for stability
 
+# ==============================================================================
+# Small helpers
+# ==============================================================================
+def flag_emoji(country_code: str) -> str:
+    """Turn a 2-letter ISO country code into its flag emoji algorithmically
+    (regional indicator symbols), so every real ISO code renders correctly
+    without needing to maintain a hand-written lookup table."""
+    code = (country_code or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return "🚩"
+    return "".join(chr(0x1F1E6 + ord(ch) - ord("A")) for ch in code)
+
+
+def clean_field(val: Optional[str]) -> str:
+    if val is None:
+        return ""
+    v = val.strip()
+    return "" if v.lower() == "null" else v
+
+
+def to_float(val: Optional[str], default: float = 0.0) -> float:
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return default
+    return f if f == f else default  # filter NaN
+
+
+def to_int(val: Optional[str], default: int = 0) -> int:
+    return int(to_float(val, default))
+
+
+# ==============================================================================
+# Data model
+# ==============================================================================
 @dataclass
-class ProxyConfig:
-    original: str
-    protocol: str
-    host: str
-    port: int
-    status: str = "pending"
+class TestResult:
+    link: str
+    status: str
     reason: str = ""
-    delay: float = float('inf')
-    speed_dl: float = 0.0
     ip: str = ""
-    country: str = ""
-    flag: str = ""
-    score: float = float('inf')
+    delay_ms: int = -1
+    download_mbps: float = 0.0
+    upload_mbps: float = 0.0
+    location: str = ""
+    protocol: str = field(init=False)
 
-    def to_csv(self):
-        return {
-            "protocol": self.protocol,
-            "status": self.status,
-            "delay": f"{self.delay:.0f}",
-            "speed": f"{self.speed_dl:.2f}",
-            "country": self.country,
-            "score": f"{self.score:.2f}",
-            "host": self.host,
-            "original": self.original
-        }
+    def __post_init__(self) -> None:
+        self.protocol = self.link.split("://", 1)[0].lower() if "://" in self.link else "unknown"
 
-def strip_ansi(text: str) -> str:
-    return RE_ANSI.sub('', text)
+    @property
+    def passed(self) -> bool:
+        return self.status in PASSED_STATUSES
 
-class GeoIPHandler:
-    def __init__(self, db_path: Optional[str]):
-        self.reader = None
-        if GEOIP_AVAILABLE and db_path and os.path.exists(db_path):
-            try:
-                self.reader = geoip2.database.Reader(db_path)
-            except: pass
+    @property
+    def score(self) -> float:
+        """Lower is better. Delay alone unless a speed test measured real
+        throughput, in which case faster links are pulled further ahead."""
+        if self.download_mbps > 0:
+            return self.delay_ms / (1.0 + self.download_mbps)
+        return float(self.delay_ms)
 
-    def lookup(self, ip: str) -> Tuple[str, str]:
-        if not self.reader or not ip: return "", DEFAULT_FLAG
-        try:
-            r = self.reader.country(ip.strip("[]"))
-            iso = r.country.iso_code
-            if iso: return iso, COUNTRY_FLAGS.get(iso.upper(), DEFAULT_FLAG)
-        except: pass
-        return "", DEFAULT_FLAG
 
-    def close(self):
-        if self.reader:
-            try: self.reader.close()
-            except: pass
-
-class ConfigLoader:
-    def __init__(self, filepath: str):
-        self.configs = []
-        self.filepath = filepath
-
-    def load(self):
-        if not os.path.exists(self.filepath): sys.exit(1)
-        with open(self.filepath, 'r', encoding='utf-8') as f: content = f.read().strip()
-        
-        # Recursive Base64 Decode
-        attempts = 0
-        while attempts < 3:
-            if "://" not in content[:100] and len(content)>20 and "\n" not in content:
-                try:
-                    pad = len(content)%4
-                    if pad: content += "="*(4-pad)
-                    decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
-                    if decoded.isprintable(): 
-                        content = decoded
-                        attempts += 1
-                        continue
-                except: break
-            break
-
-        for line in content.splitlines():
-            self._parse(line)
-
-    def _parse(self, line: str):
-        line = line.strip()
-        if not line or line.startswith("#"): return
-        
-        proto = None
-        l = line.lower()
-        if l.startswith("vmess://"): proto = "vmess"
-        elif l.startswith("vless://"): proto = "vless"
-        elif l.startswith("trojan://"): proto = "trojan"
-        elif l.startswith("ss://"): proto = "ss"
-        elif l.startswith("ssr://"): proto = "ssr"
-        elif l.startswith("tuic://"): proto = "tuic"
-        elif l.startswith(("hysteria://", "hysteria2://", "hy2://")): proto = "hysteria"
-        elif l.startswith(("wg://", "wireguard://", "warp://")): proto = "wg"
-        
-        if proto:
-            try:
-                p = urllib.parse.urlparse(line)
-                host = p.hostname or "unknown"
-                port = p.port or 0
-                self.configs.append(ProxyConfig(line, proto, host, port))
-            except: pass
-
-    def deduplicate(self):
-        uniq = {}
-        for c in self.configs:
-            k = f"{c.protocol}://{c.host}:{c.port}" if c.host != "unknown" else c.original
-            h = hashlib.md5(k.encode()).hexdigest()
-            if h not in uniq: uniq[h] = c
-        self.configs = list(uniq.values())
-        logger.info(f"Loaded {len(self.configs)} unique configs.")
-
-class Tester:
-    def __init__(self, xray_bin, geoip, speedtest, insecure):
-        self.xray_bin = xray_bin
-        self.geoip = geoip
-        self.speedtest = speedtest
-        self.insecure = insecure
-        self.fail_logs: Set[str] = set()
-        self.log_limit = 5  # Max unique error logs to print
-
-    async def verify_bin(self):
-        if not self.xray_bin: return False
-        try:
-            # Add current dir to PATH implicitly for check
-            env = os.environ.copy()
-            env["PATH"] = f"{os.getcwd()}:{env.get('PATH','')}"
-            p = await asyncio.create_subprocess_exec(
-                self.xray_bin, "--help", 
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env=env
+def load_results_csv(path: Path) -> List[TestResult]:
+    results: List[TestResult] = []
+    with path.open(newline="", encoding="utf-8", errors="replace") as fh:
+        for row in csv.DictReader(fh):
+            results.append(
+                TestResult(
+                    link=row.get("link", "").strip(),
+                    status=clean_field(row.get("status")).lower() or "unknown",
+                    reason=clean_field(row.get("reason")),
+                    ip=clean_field(row.get("ip")),
+                    delay_ms=to_int(row.get("delay"), -1),
+                    download_mbps=to_float(row.get("download")),
+                    upload_mbps=to_float(row.get("upload")),
+                    location=clean_field(row.get("location")),
+                )
             )
-            await p.communicate()
-            return True
-        except: return False
+    return results
 
-    async def test_wg(self, c: ProxyConfig):
-        try:
-            if c.host == "unknown": raise ValueError("No host")
-            loop = asyncio.get_running_loop()
-            
-            try:
-                ai = await loop.getaddrinfo(c.host, c.port, type=socket.SOCK_DGRAM)
-                ip = ai[0][4][0]
-                fam = ai[0][0]
-            except: 
-                c.status = "failed"; c.reason="DNS"; return
 
-            t0 = loop.time()
-            class P(asyncio.DatagramProtocol):
-                def __init__(self): self.f = asyncio.Future()
-                def connection_made(self, t): t.sendto(b'\x00'*4)
-                def datagram_received(self, d, a): 
-                    if not self.f.done(): self.f.set_result(True)
-                def error_received(self, e): pass
-            
-            try:
-                tr, pr = await loop.create_datagram_endpoint(lambda: P(), remote_addr=(ip, c.port), family=fam)
-                await asyncio.wait_for(pr.f, timeout=2.0)
-            except asyncio.TimeoutError: pass 
-            except: 
-                c.status="failed"; c.reason="Unreachable"
-                if 'tr' in locals() and tr: tr.close()
-                return
-            
-            if 'tr' in locals() and tr: tr.close()
-            
-            c.status = "passed"
-            c.delay = (loop.time() - t0) * 1000
-            c.ip = ip
-            c.country, c.flag = self.geoip.lookup(ip)
-            c.score = c.delay
+# ==============================================================================
+# Input loading / de-duplication
+# ==============================================================================
+def load_input_configs(path: Path) -> List[str]:
+    if not path.exists():
+        log.critical("Input file not found: %s", path)
+        sys.exit(2)
 
-        except Exception as e:
-            c.status = "broken"; c.reason = str(e)
+    seen = set()
+    configs: List[str] = []
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "://" not in line:
+                continue
+            if line in seen:
+                continue
+            seen.add(line)
+            configs.append(line)
+    return configs
 
-    async def test_xray(self, c: ProxyConfig):
-        cmd = [self.xray_bin, "net", "http", "-c", c.original, "-d", str(DEFAULT_TIMEOUT_MS), "--url", DEFAULT_TEST_URL, "-z", "auto", "-v"]
-        if self.speedtest: cmd.extend(["-p", "-a", "1000"]) # 1MB test to check bandwidth
-        if self.insecure: cmd.append("-e")
-        if not self.geoip.reader: cmd.append("--rip")
 
-        try:
-            # CRITICAL: PATH must include current dir for xray-core
-            env = os.environ.copy()
-            env["PATH"] = f"{os.getcwd()}:{env.get('PATH', '')}"
-            env["WSL_INTEROP"] = ""
+# ==============================================================================
+# xray-knife invocation
+# ==============================================================================
+def resolve_xray_knife(explicit_path: Optional[str]) -> str:
+    candidates = []
+    if explicit_path:
+        candidates.append(explicit_path)
+    which = shutil.which("xray-knife")
+    if which:
+        candidates.append(which)
+    candidates.append(str(Path.cwd() / "xray-knife"))
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, 
-                stdout=asyncio.subprocess.PIPE, 
-                stderr=asyncio.subprocess.PIPE,
-                env=env
+    for candidate in candidates:
+        p = Path(candidate)
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p.resolve())
+
+    log.critical(
+        "Could not find a runnable 'xray-knife' binary. Looked at: %s",
+        ", ".join(candidates) or "(nothing)",
+    )
+    sys.exit(2)
+
+
+def verify_binary(xray_knife: str) -> None:
+    try:
+        proc = subprocess.run(
+            [xray_knife, "-V"], capture_output=True, text=True, timeout=15
+        )
+    except Exception as exc:
+        log.critical("Failed to execute xray-knife (%s): %s", xray_knife, exc)
+        sys.exit(2)
+    if proc.returncode != 0:
+        log.critical("xray-knife -V exited with %d: %s", proc.returncode, proc.stderr.strip())
+        sys.exit(2)
+    version_line = (proc.stdout or proc.stderr).strip().splitlines()[0] if (proc.stdout or proc.stderr) else "unknown"
+    log.info("Using %s", version_line or xray_knife)
+
+
+def run_xray_knife_batch(
+    xray_knife: str,
+    input_file: Path,
+    csv_output: Path,
+    db_path: Path,
+    args: argparse.Namespace,
+) -> int:
+    cmd = [
+        xray_knife, "http",
+        "-f", str(input_file),
+        "-o", str(csv_output),
+        "-x", "csv",
+        "-t", str(args.threads),
+        "-d", str(args.max_delay),
+        "-u", args.test_url,
+        "--retries", str(args.retries),
+        "--rip",
+        "--dedup-semantic",
+        "--sort",
+        "--db", str(db_path),
+    ]
+    if args.speedtest:
+        cmd += ["-S", "--amount", str(args.speedtest_amount)]
+    if not args.strict_tls:
+        cmd.append("-e")
+    if not args.no_prescan:
+        cmd += ["--prescan", "--prescan-timeout", str(args.prescan_timeout)]
+    if args.max_passed:
+        cmd += ["--max-passed", str(args.max_passed)]
+
+    log.info("Running: %s", " ".join(cmd))
+    log.info(
+        "Testing %d configs (threads=%d, max-delay=%dms, speedtest=%s, prescan=%s)...",
+        sum(1 for _ in input_file.open(encoding="utf-8", errors="replace")),
+        args.threads, args.max_delay, args.speedtest, not args.no_prescan,
+    )
+
+    start = time.time()
+    try:
+        # Inherit stdout/stderr so the live progress bar / per-config
+        # errors show up directly in the CI log instead of being buffered
+        # and dumped all at once (or lost) at the end.
+        proc = subprocess.run(cmd, timeout=args.overall_timeout or None)
+    except subprocess.TimeoutExpired:
+        log.error(
+            "xray-knife did not finish within %ds - aborting this run without "
+            "touching the previous output (nothing published this cycle).",
+            args.overall_timeout,
+        )
+        return 124
+    elapsed = time.time() - start
+    log.info("xray-knife finished in %.1fs with exit code %d", elapsed, proc.returncode)
+    return proc.returncode
+
+
+# ==============================================================================
+# Reporting
+# ==============================================================================
+def build_alias(prefix: str, protocol: str, rank: int, result: TestResult) -> str:
+    flag = flag_emoji(result.location)
+    parts = [f"🔒{prefix}🦈", f"[{protocol.upper()}]", f"[{rank:02d}]", f"[{flag}]"]
+    if result.download_mbps > 0:
+        parts.append(f"[{result.download_mbps:.1f}Mbps]")
+    if result.delay_ms >= 0:
+        parts.append(f"[{result.delay_ms}ms]")
+    return "".join(parts)
+
+
+def rank_and_select(
+    results: List[TestResult], limit: int, accept_semi_passed: bool
+) -> Dict[str, List[TestResult]]:
+    accepted_statuses = PASSED_STATUSES | (SEMI_PASSED_STATUSES if accept_semi_passed else set())
+    grouped: Dict[str, List[TestResult]] = {}
+    for r in results:
+        if r.status not in accepted_statuses:
+            continue
+        grouped.setdefault(r.protocol, []).append(r)
+
+    for protocol, items in grouped.items():
+        items.sort(key=lambda r: r.score)
+        grouped[protocol] = items[:limit]
+    return grouped
+
+
+def write_subscription(
+    grouped: Dict[str, List[TestResult]], output_path: Path, output_format: str, prefix: str
+) -> int:
+    lines: List[str] = []
+    total = 0
+    for protocol in sorted(grouped):
+        for rank, result in enumerate(grouped[protocol], start=1):
+            alias = build_alias(prefix, protocol, rank, result)
+            base_link = result.link.split("#", 1)[0]
+            lines.append(f"{base_link}#{urllib.parse.quote(alias)}")
+            total += 1
+
+    if not lines:
+        return 0
+
+    data = "\n".join(lines) + "\n"
+    if output_format == "base64":
+        data = base64.b64encode(data.encode("utf-8")).decode("ascii")
+
+    output_path.write_text(data, encoding="utf-8")
+    return total
+
+
+def write_full_report(results: List[TestResult], report_path: Path) -> None:
+    with report_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["protocol", "status", "delay_ms", "download_mbps", "upload_mbps", "location", "ip", "reason", "link"])
+        for r in sorted(results, key=lambda x: (x.protocol, x.score)):
+            writer.writerow([r.protocol, r.status, r.delay_ms, r.download_mbps, r.upload_mbps, r.location, r.ip, r.reason, r.link])
+
+
+def log_summary(results: List[TestResult]) -> None:
+    from collections import Counter
+
+    by_status = Counter(r.status for r in results)
+    log.info(
+        "Results: %d total | passed=%d semi-passed=%d failed=%d broken=%d timeout=%d other=%d",
+        len(results),
+        by_status.get("passed", 0),
+        by_status.get("semi-passed", 0),
+        by_status.get("failed", 0),
+        by_status.get("broken", 0),
+        by_status.get("timeout", 0),
+        sum(v for k, v in by_status.items() if k not in {"passed", "semi-passed", "failed", "broken", "timeout"}),
+    )
+    by_protocol_passed = Counter(r.protocol for r in results if r.passed)
+    if by_protocol_passed:
+        breakdown = ", ".join(f"{proto}={count}" for proto, count in sorted(by_protocol_passed.items()))
+        log.info("Passed by protocol: %s", breakdown)
+
+
+# ==============================================================================
+# CLI
+# ==============================================================================
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Pr0xySh4rk config tester + reporter")
+    p.add_argument("--input", required=True, help="File with raw config links, one per line")
+    p.add_argument("--output", required=True, help="Where to write the final subscription")
+    p.add_argument("--output-format", choices=["base64", "plain"], default="base64")
+    p.add_argument("--csv-report", help="Optional path to dump the full per-config test report (CSV)")
+
+    p.add_argument("--xray-knife-path", help="Path to the xray-knife binary (default: search PATH, then ./xray-knife)")
+
+    p.add_argument("--limit", type=int, default=50, help="Max configs to keep PER PROTOCOL (default: %(default)s)")
+    p.add_argument("--threads", type=int, default=50, help="Concurrent xray-knife test workers (default: %(default)s)")
+    p.add_argument("--max-delay", type=int, default=8000, help="Max allowed round-trip delay in ms (default: %(default)s)")
+    p.add_argument("--test-url", default=DEFAULT_TEST_URL, help="URL each config is tested against (default: Cloudflare trace, needed for IP/location)")
+    p.add_argument("--retries", type=int, default=1, help="xray-knife retries per config (default: %(default)s)")
+
+    p.add_argument("--speedtest", action="store_true", default=True, help="Measure real throughput for configs that pass (default: on)")
+    p.add_argument("--no-speedtest", dest="speedtest", action="store_false")
+    p.add_argument("--speedtest-amount", type=int, default=10000, help="Speed test transfer size in KB (default: %(default)s)")
+
+    p.add_argument("--strict-tls", action="store_true", help="Do NOT allow insecure/fake-SNI TLS (default: insecure allowed, matches how most public configs are shared)")
+
+    p.add_argument("--no-prescan", action="store_true", help="Disable the fast TCP pre-check that drops obviously-dead endpoints first")
+    p.add_argument("--prescan-timeout", type=int, default=2500, help="TCP pre-check dial timeout in ms (default: %(default)s)")
+
+    p.add_argument("--max-passed", type=int, default=0, help="Stop early once this many configs have passed (0 = test all)")
+    p.add_argument("--accept-semi-passed", action="store_true", help="Also accept 'semi-passed' results (only relevant with multi-endpoint checks)")
+
+    p.add_argument("--name-prefix", default="Pr0xySh4rk", help="Prefix used in the renamed config remarks (default: %(default)s)")
+    p.add_argument("--overall-timeout", type=int, default=0, help="Hard wall-clock limit in seconds for the whole test run (0 = no limit; rely on the CI job timeout instead)")
+
+    return p.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    input_path = Path(args.input)
+    output_path = Path(args.output)
+
+    configs = load_input_configs(input_path)
+    if not configs:
+        log.error("No usable config links found in %s - nothing to test.", input_path)
+        return 1
+    log.info("Loaded %d unique config link(s) from %s", len(configs), input_path)
+
+    xray_knife = resolve_xray_knife(args.xray_knife_path)
+    verify_binary(xray_knife)
+
+    with tempfile.TemporaryDirectory(prefix="pr0xysh4rk-") as tmpdir:
+        tmp = Path(tmpdir)
+        input_for_knife = tmp / "configs_to_test.txt"
+        input_for_knife.write_text("\n".join(configs) + "\n", encoding="utf-8")
+
+        raw_csv = tmp / "raw_results.csv"
+        db_path = tmp / "xray-knife.db"
+
+        rc = run_xray_knife_batch(xray_knife, input_for_knife, raw_csv, db_path, args)
+
+        if not raw_csv.exists():
+            log.error(
+                "xray-knife did not produce a results file (exit code %d) - "
+                "leaving the previous published output untouched.", rc,
             )
-            
-            try:
-                out, err = await asyncio.wait_for(proc.communicate(), timeout=DEFAULT_TIMEOUT_MS/1000 + 5)
-            except asyncio.TimeoutError:
-                try: proc.kill() 
-                except: pass
-                c.status = "timeout"; return
+            return 1
 
-            raw_output = (out.decode('utf-8', 'ignore') + err.decode('utf-8', 'ignore'))
-            clean_output = strip_ansi(raw_output)
+        results = load_results_csv(raw_csv)
 
-            dm = RE_DELAY.search(clean_output)
-            if dm:
-                c.delay = float(dm.group(1))
-                c.status = "passed"
-            else:
-                c.status = "failed"
-                # Debug logging for failures (limited)
-                if len(self.fail_logs) < self.log_limit:
-                    err_snip = clean_output[:200].replace('\n', ' ')
-                    if err_snip not in self.fail_logs:
-                        self.fail_logs.add(err_snip)
-                        logger.warning(f"Xray Fail Sample: {err_snip}")
-                
-                if "timeout" in clean_output.lower(): c.reason = "Timeout"
-                else: c.reason = "Fail"
-                return
+        # Preserve the full report before it disappears with the tempdir.
+        if args.csv_report:
+            write_full_report(results, Path(args.csv_report))
+            log.info("Wrote full diagnostic report to %s", args.csv_report)
 
-            sm = RE_DOWNLOAD.search(clean_output)
-            if sm:
-                val, unit = float(sm.group(1)), sm.group(2).upper()
-                c.speed_dl = val * (1000 if unit == 'G' else 0.001 if unit == 'K' else 1)
+    log_summary(results)
 
-            im = RE_IP_LOC.search(clean_output)
-            if im:
-                c.ip = im.group('ip')
-                if im.group('loc'): c.country, c.flag = im.group('loc'), COUNTRY_FLAGS.get(im.group('loc').upper(), DEFAULT_FLAG)
+    grouped = rank_and_select(results, args.limit, args.accept_semi_passed)
+    total_kept = sum(len(v) for v in grouped.values())
 
-            if self.geoip.reader and c.ip:
-                cc, ff = self.geoip.lookup(c.ip)
-                if cc: c.country, c.flag = cc, ff
+    if total_kept == 0:
+        log.warning(
+            "No configs passed testing this run. Leaving the previously "
+            "published %s untouched rather than publishing an empty list.",
+            output_path,
+        )
+        return 3
 
-            c.score = c.delay / (1 + c.speed_dl) if c.speed_dl > 0 else c.delay
+    written = write_subscription(grouped, output_path, args.output_format, args.name_prefix)
+    log.info("Wrote %d healthy configs to %s (%s)", written, output_path, args.output_format)
+    return 0
 
-        except Exception as e:
-            c.status = "broken"; c.reason = str(e)
-
-    async def worker(self, c, sem):
-        async with sem:
-            if c.protocol == "wg": await self.test_wg(c)
-            else: await self.test_xray(c)
-
-class Reporter:
-    def __init__(self, prefix): self.prefix = prefix
-    
-    def report(self, configs, limit, path, fmt):
-        passed = [c for c in configs if c.status == "passed"]
-        grouped = {}
-        for c in passed: grouped.setdefault(c.protocol, []).append(c)
-        
-        final = []
-        for p, items in grouped.items():
-            items.sort(key=lambda x: x.score)
-            sel = items[:limit]
-            logger.info(f"Protocol {p.upper()}: {len(sel)}/{len(items)} passed/saved.")
-            for i, c in enumerate(sel, 1):
-                flag = c.flag or DEFAULT_FLAG
-                alias = f"🔒{self.prefix}🦈[{p.upper()}][{i:02d}][{flag}]"
-                if c.speed_dl > 0: alias += f"[{c.speed_dl:.1f}M]"
-                enc = urllib.parse.quote(alias)
-                base = c.original.split("#")[0]
-                final.append(f"{base}#{enc}")
-        
-        if not final:
-            logger.warning("No working configs.")
-            return
-
-        data = "\n".join(final)
-        if fmt == "base64": data = base64.b64encode(data.encode()).decode()
-        
-        with open(path, 'w', encoding='utf-8') as f: f.write(data)
-        logger.info(f"Saved {len(final)} configs to {path}")
-
-    def csv(self, configs, path):
-        try:
-            with open(path, 'w', newline='', encoding='utf-8') as f:
-                w = csv.DictWriter(f, fieldnames=["protocol","status","delay","speed","country","score","host","original"], extrasaction='ignore')
-                w.writeheader()
-                for c in configs: w.writerow(c.to_csv())
-        except: pass
-
-async def async_main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--input", required=True)
-    p.add_argument("--output", required=True)
-    p.add_argument("--output-format", default="base64")
-    p.add_argument("--csv")
-    p.add_argument("--xray-knife-path")
-    p.add_argument("--geoip-db")
-    p.add_argument("--threads", type=int, default=40)
-    p.add_argument("--limit", type=int, default=50)
-    p.add_argument("--speedtest", action="store_true")
-    p.add_argument("--xray-knife-insecure", action="store_true", dest="insecure")
-    p.add_argument("--name-prefix", default="Pr0xySh4rk")
-    p.add_argument("--speedtest-amount")
-    args = p.parse_args()
-
-    loader = ConfigLoader(args.input)
-    loader.load()
-    loader.deduplicate()
-    if not loader.configs: sys.exit(0)
-
-    # Bin check
-    xray_bin = ""
-    if args.xray_knife_path and os.path.exists(args.xray_knife_path):
-        xray_bin = str(Path(args.xray_knife_path).resolve())
-    elif shutil.which("xray-knife"):
-        xray_bin = shutil.which("xray-knife")
-    elif os.path.exists("xray-knife"):
-        xray_bin = str(Path("xray-knife").resolve())
-
-    if not xray_bin:
-        logger.critical("xray-knife not found. Exiting.")
-        sys.exit(1)
-
-    geoip = GeoIPHandler(args.geoip_db)
-    tester = Tester(xray_bin, geoip, args.speedtest, args.insecure)
-
-    if not await tester.verify_bin():
-        logger.critical("Binary verification failed.")
-        sys.exit(1)
-
-    sem = asyncio.Semaphore(args.threads)
-    tasks = []
-    logger.info(f"Testing {len(loader.configs)} configs...")
-    
-    for c in loader.configs:
-        if c.protocol != "wg" and not xray_bin:
-            c.status = "skipped"; continue
-        tasks.append(tester.worker(c, sem))
-
-    if TQDM_AVAILABLE:
-        for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), unit="cfg"): await f
-    else:
-        done=0
-        for f in asyncio.as_completed(tasks):
-            await f; done+=1
-            if done%100==0: sys.stdout.write(f"\r{done}/{len(tasks)}"); sys.stdout.flush()
-        print("")
-
-    rep = Reporter(args.name_prefix)
-    rep.report(loader.configs, args.limit, args.output, args.output_format)
-    if args.csv: rep.csv(loader.configs, args.csv)
-    geoip.close()
-
-def main():
-    if sys.platform=='win32': asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    try: asyncio.run(async_main())
-    except KeyboardInterrupt: pass
-    except Exception as e: logger.exception(e); sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

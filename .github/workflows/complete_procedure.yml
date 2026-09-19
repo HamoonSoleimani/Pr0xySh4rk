@@ -1,117 +1,135 @@
-name: Complete Pr0xySh4rk Update
+name: Update Pr0xySh4rk Subscription
 
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
+    inputs:
+      config_limit:
+        description: 'Max healthy configs to keep per protocol'
+        required: false
+        default: '50'
+      speedtest:
+        description: 'Run a real throughput speed test on configs that pass'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
 
 permissions:
   contents: write
 
+# Prevent two runs from racing to commit at the same time (e.g. a manual
+# dispatch overlapping the schedule).
+concurrency:
+  group: pr0xysh4rk-update
+  cancel-in-progress: false
+
+env:
+  CONFIG_LIMIT: ${{ github.event.inputs.config_limit || '50' }}
+  THREADS: '60'
+  SPEEDTEST: ${{ github.event.inputs.speedtest || 'true' }}
+
 jobs:
   update-proxies:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
-    env:
-      GEOIP_URL: "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
-      # Required for Xray-Core to function
-      GEO_ASSETS_URL: "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
-      GEO_IP_URL: "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
-      CONFIG_LIMIT: 50
-      THREADS: 30 # Lowered slightly to ensure stability with Xray overhead
-      SPEEDTEST_ENABLED: "true"
+    # 5 curated sources + a modern batch tester finish in minutes, not
+    # hours - no need for the old 360-minute ceiling.
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
           cache: 'pip'
 
-      - name: Install Python Dependencies
+      - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install requests urllib3 tqdm python-dotenv geoip2
+          pip install -r requirements.txt
 
-      - name: Run Collector (main.py)
+      - name: Collect configs
         run: |
-          python main.py
+          python main.py --output collected_configs.txt
           if [ ! -s collected_configs.txt ]; then
-            echo "::error::Collector failed."
+            echo "::error::Collector produced no configs - aborting before touching the published subscription."
             exit 1
           fi
+          echo "Collected $(wc -l < collected_configs.txt) unique configs."
 
-      - name: Install Tools (Xray Stack)
+      - name: Install xray-knife
         run: |
-          # 1. GeoIP Database (for Python script)
-          wget -q -O Country.mmdb "${{ env.GEOIP_URL }}"
-
-          # 2. Xray-Core (Engine)
-          echo "Installing Xray-Core..."
-          wget -q -O xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-          unzip -o xray.zip -d xray_core
-          mv xray_core/xray .
-          
-          # 3. Xray Assets (CRITICAL for Xray to run)
-          echo "Installing Xray Assets..."
-          mv xray_core/geoip.dat .
-          mv xray_core/geosite.dat .
-          chmod +x xray
-          rm -rf xray_core xray.zip
-
-          # 4. Xray-Knife (Tester)
-          echo "Installing Xray-Knife..."
-          LATEST_TAG=$(curl -sL "https://api.github.com/repos/lilendian0x00/xray-knife/releases/latest" | jq -r ".tag_name")
-          wget -q -O knife.zip "https://github.com/lilendian0x00/xray-knife/releases/download/${LATEST_TAG}/Xray-knife-linux-64.zip"
-          unzip -o knife.zip -d knife_temp
-          # Find binary recursively
-          KNIFE_BIN=$(find knife_temp -type f -name "xray-knife" | head -n 1)
-          mv "$KNIFE_BIN" ./xray-knife
+          # NOTE: deliberately NOT using the GitHub *API* to resolve "latest"
+          # (api.github.com/repos/.../releases/latest + jq) - that endpoint is
+          # unauthenticated-rate-limited to 60 req/hour and silently returns a
+          # rate-limit error instead of a tag under any real load, which used
+          # to break this exact step. The "latest/download/<asset>" URL below
+          # is a stable redirect GitHub provides specifically to avoid that.
+          echo "Downloading latest xray-knife release..."
+          curl -fsSL --retry 3 --retry-delay 5 -o xray-knife.zip \
+            "https://github.com/lilendian0x00/xray-knife/releases/latest/download/Xray-knife-linux-64.zip"
+          unzip -o -q xray-knife.zip -d xray-knife-dist
+          mv xray-knife-dist/xray-knife .
           chmod +x xray-knife
-          rm -rf knife_temp knife.zip
+          rm -rf xray-knife-dist xray-knife.zip
 
-          # 5. Verify
-          echo "Verifying binaries..."
-          ./xray -version || exit 1
-          ./xray-knife --help > /dev/null || exit 1
-          ls -lh xray xray-knife geoip.dat geosite.dat Country.mmdb
+          # xray-knife v11+ embeds xray-core as a library - no separate
+          # xray/xray-core binary, geoip.dat or geosite.dat needed for
+          # HTTP-mode testing, unlike the old collector/tester pair.
+          ./xray-knife -V
 
-      - name: Run Processor (Pr0xySh4rk.py)
+      - name: Test configs and build subscription
         run: |
-          # Add current directory to PATH so xray-knife can find xray
-          export PATH=$(pwd):$PATH
-          
+          set +e
           python Pr0xySh4rk.py \
             --input collected_configs.txt \
             --output Pr0xySh4rk_SubBase64.txt \
             --output-format base64 \
-            --limit ${{ env.CONFIG_LIMIT }} \
-            --threads ${{ env.THREADS }} \
-            --geoip-db Country.mmdb \
+            --csv-report test_report.csv \
             --xray-knife-path ./xray-knife \
-            --xray-knife-insecure \
-            --speedtest \
-            --csv report.csv
+            --limit "${CONFIG_LIMIT}" \
+            --threads "${THREADS}" \
+            --overall-timeout 2700 \
+            $( [ "${SPEEDTEST}" = "true" ] && echo --speedtest || echo --no-speedtest )
+          rc=$?
+          set -e
 
-      - name: Commit and Push
-        if: success()
+          # Exit code 3 means "ran fine, nothing passed this round" - the
+          # tester deliberately leaves the previously published subscription
+          # untouched rather than publishing an empty list. That's a normal
+          # outcome for a list of free public proxies, not a pipeline error.
+          if [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; then
+            exit 0
+          fi
+          echo "::error::Pr0xySh4rk.py failed with exit code $rc"
+          exit "$rc"
+
+      - name: Upload diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: test_report.csv
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Commit and push if changed
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
+
           git add Pr0xySh4rk_SubBase64.txt
-          
-          # Clean temp files
-          rm -f collected_configs.txt Country.mmdb xray xray-knife geoip.dat geosite.dat report.csv
-          
+
+          rm -f collected_configs.txt xray-knife test_report.csv
+
           if git diff --staged --quiet; then
-            echo "No changes."
+            echo "No changes to publish."
           else
-            git commit -m "Update Proxies: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            git commit -m "Update proxies: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
             git pull --rebase --autostash
             git push
           fi
