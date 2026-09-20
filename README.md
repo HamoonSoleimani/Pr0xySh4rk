@@ -1,3 +1,5 @@
+
+
 # Pr0xySh4rk
 ![image](https://github.com/user-attachments/assets/c3ba4213-3a1f-4d76-809a-42d1a8a1e993)
 **Pr0xySh4rk** collects free vmess / vless / trojan / shadowsocks / hysteria2 /
@@ -79,10 +81,11 @@ per-config diagnostic dump, etc).
 - **Sources** live in the `SOURCES` list at the top of `main.py`. Add or
   remove URLs there; a trailing `#name` fragment on a source URL is purely a
   cosmetic label for the logs (fragments are never sent to the server).
-- **Per-protocol limit**, **thread count**, and whether to **speed-test**
-  are all controllable from the GitHub Actions "Run workflow" button
-  (`workflow_dispatch` inputs), or via `--limit` / `--threads` / `--speedtest`
-  when running locally.
+- **Per-protocol limit** and whether to **speed-test**
+  are controllable from the GitHub Actions "Run workflow" button
+  (`workflow_dispatch` inputs), or via `--limit` / `--speedtest`
+  when running locally; **thread count** can be set locally with
+  `--threads` (the workflow uses a fixed value).
 - The workflow schedule is set in
   `.github/workflows/complete_procedure.yml` (`cron: '0 */6 * * *'`, every 6
   hours by default).
